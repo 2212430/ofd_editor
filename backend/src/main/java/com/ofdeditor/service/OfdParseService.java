@@ -257,6 +257,13 @@ public class OfdParseService {
                         dto.setPathPoints(pathData.trim());
                     }
                 }
+                String storedPoints = firstNonBlank(el.getAttribute("PathPoints"), el.getAttribute("pathPoints"));
+                if (isNotBlank(storedPoints)) {
+                    dto.setPathPoints(storedPoints.trim());
+                } else if (isNotBlank(dto.getPathPoints()) && isLikelyOfdPathData(dto.getPathPoints())) {
+                    String jsonPoints = ofdPathToJsonPointPairs(dto.getPathPoints(), nums.get(0), nums.get(1));
+                    if (isNotBlank(jsonPoints)) dto.setPathPoints(jsonPoints);
+                }
 
                 // 颜色赋值
                 dto.setColor(parseRgbString(fillColorStr, "#FFFF00"));
@@ -275,7 +282,10 @@ public class OfdParseService {
                 double  h         = nums.get(3);
                 double  w         = nums.get(2);
 
-                if (hasFill && !hasStroke) {
+                String explicitType = firstNonBlank(el.getAttribute("Type"), el.getAttribute("type"));
+                if (isNotBlank(explicitType)) {
+                    dto.setType(explicitType.trim().toUpperCase(Locale.ROOT));
+                } else if (hasFill && !hasStroke) {
                     // 仅填充：高亮（扁平矩形区域）
                     dto.setType(h < 5.0 ? "HIGHLIGHT" : "RECTANGLE");
                 } else if (!hasFill && hasStroke) {
@@ -1008,6 +1018,11 @@ public class OfdParseService {
         dto.setFontFamily(fontFamily);
         dto.setBold(false);
         dto.setItalic(false);
+        String rotate = firstNonBlank(el.getAttribute("Rotate"), el.getAttribute("rotate"));
+        Double rotation = tryParseDouble(rotate);
+        if (rotation != null) {
+            dto.setRotation(rotation);
+        }
     }
 
     private void parseImageFromDom(Element el, ElementDTO dto, ParseContext ctx) {
@@ -1978,6 +1993,39 @@ public class OfdParseService {
     }
 
     private String safeStr(String s) { return s == null ? "" : s.trim(); }
+
+    private boolean isLikelyOfdPathData(String pathData) {
+        if (!isNotBlank(pathData)) return false;
+        return pathData.contains("M") || pathData.contains("L") || pathData.contains("B")
+                || pathData.contains("Q") || pathData.contains("A");
+    }
+
+    private String ofdPathToJsonPointPairs(String pathData, double baseX, double baseY) {
+        if (!isNotBlank(pathData)) return null;
+        List<double[]> points = new ArrayList<>();
+        String[] tokens = pathData.trim().split("\\s+");
+        int i = 0;
+        while (i < tokens.length) {
+            String cmd = tokens[i];
+            if (("M".equals(cmd) || "S".equals(cmd) || "L".equals(cmd)) && i + 2 < tokens.length) {
+                Double x = tryParseDouble(tokens[i + 1]);
+                Double y = tryParseDouble(tokens[i + 2]);
+                if (x != null && y != null) points.add(new double[]{x - baseX, y - baseY});
+                i += 3;
+            } else {
+                i++;
+            }
+        }
+        if (points.isEmpty()) return null;
+        StringBuilder sb = new StringBuilder();
+        sb.append("[");
+        for (int j = 0; j < points.size(); j++) {
+            if (j > 0) sb.append(",");
+            sb.append(String.format(Locale.ROOT, "[%.4f,%.4f]", points.get(j)[0], points.get(j)[1]));
+        }
+        sb.append("]");
+        return sb.toString();
+    }
 
     // ==================== 内部类 ====================
 

@@ -839,9 +839,11 @@ async function commitAnnotation(
       base.height = 0
       break
     case 'ARROW':
+      // 保留真实起点和终点，避免把起点固定成包围盒左上角导致方向失真
+      // x/y 仍使用包围盒左上角，pathPoints 存相对该锚点的两端点
       base.pathPoints = [
-        [0, 0],
-        [width, height],
+        [drawStartX.value - x, drawStartY.value - y],
+        [drawCurX.value - x, drawCurY.value - y],
       ]
       break
     case 'FREEHAND':

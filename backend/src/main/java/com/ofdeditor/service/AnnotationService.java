@@ -107,20 +107,18 @@ public class AnnotationService {
         for (List<AnnotationDTO> list : pageMap.values()) {
             for (int i = 0; i < list.size(); i++) {
                 if (list.get(i).getId().equals(annotationId)) {
-                    // 保留原始创建时间
-                    updated.setId(annotationId);
-                    updated.setCreatedAt(list.get(i).getCreatedAt());
-                    updated.setUpdatedAt(System.currentTimeMillis());
-                    list.set(i, updated);
+                    AnnotationDTO existing = list.get(i);
+                    AnnotationDTO merged = mergeAnnotation(existing, updated, annotationId);
+                    list.set(i, merged);
 
                     // 写回 OFD
                     try {
-                        ofdRebuildService.updateAnnotationInOfd(fileId, updated);
+                        ofdRebuildService.updateAnnotationInOfd(fileId, existing, merged);
                     } catch (Exception e) {
                         System.err.println("[AnnotationService] 更新OFD注释失败: " + e.getMessage());
                     }
 
-                    return updated;
+                    return merged;
                 }
             }
         }
@@ -194,5 +192,33 @@ public class AnnotationService {
      */
     public void initFromOfd(String fileId, Map<Integer, List<AnnotationDTO>> annotationsFromOfd) {
         cache.put(fileId, new ConcurrentHashMap<>(annotationsFromOfd));
+    }
+
+    private AnnotationDTO mergeAnnotation(AnnotationDTO existing, AnnotationDTO patch, String annotationId) {
+        AnnotationDTO merged = new AnnotationDTO();
+        merged.setId(annotationId);
+        merged.setCreatedAt(existing.getCreatedAt());
+        merged.setUpdatedAt(System.currentTimeMillis());
+
+        merged.setType(firstNonNull(patch.getType(), existing.getType()));
+        merged.setPageIndex(firstNonNull(patch.getPageIndex(), existing.getPageIndex()));
+        merged.setX(firstNonNull(patch.getX(), existing.getX()));
+        merged.setY(firstNonNull(patch.getY(), existing.getY()));
+        merged.setWidth(firstNonNull(patch.getWidth(), existing.getWidth()));
+        merged.setHeight(firstNonNull(patch.getHeight(), existing.getHeight()));
+        merged.setColor(firstNonNull(patch.getColor(), existing.getColor()));
+        merged.setOpacity(firstNonNull(patch.getOpacity(), existing.getOpacity()));
+        merged.setContent(firstNonNull(patch.getContent(), existing.getContent()));
+        merged.setFontSize(firstNonNull(patch.getFontSize(), existing.getFontSize()));
+        merged.setFontColor(firstNonNull(patch.getFontColor(), existing.getFontColor()));
+        merged.setStrokeColor(firstNonNull(patch.getStrokeColor(), existing.getStrokeColor()));
+        merged.setLineWidth(firstNonNull(patch.getLineWidth(), existing.getLineWidth()));
+        merged.setPathPoints(firstNonNull(patch.getPathPoints(), existing.getPathPoints()));
+        merged.setStampBase64(firstNonNull(patch.getStampBase64(), existing.getStampBase64()));
+        return merged;
+    }
+
+    private <T> T firstNonNull(T a, T b) {
+        return a != null ? a : b;
     }
 }

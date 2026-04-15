@@ -241,6 +241,14 @@ public class OfdRebuildService {
         if (el.getColor() != null) {
             updateTextColor(doc, matched, el.getColor());
         }
+        // 5. 修改斜体
+        if (el.getItalic() != null) {
+            updateTextItalic(doc, matched, el.getItalic());
+        }
+        // 6. 修改旋转角度
+        if (el.getRotation() != null) {
+            updateTextRotation(matched, el.getRotation());
+        }
 
         log.debug("TEXT节点已修改: content={}", el.getContent());
     }
@@ -295,7 +303,7 @@ public class OfdRebuildService {
             if (!(n instanceof Element)) continue;
             Element e = (Element) n;
 
-            double[] boundary = parseBoundaryAttr(e);
+            double[] boundary = parseBoundaryForMatch(e);
             if (boundary == null) continue;
 
             double score = Math.abs(boundary[0] - ox)
@@ -338,6 +346,37 @@ public class OfdRebuildService {
         } catch (NumberFormatException ex) {
             return null;
         }
+    }
+
+    /**
+     * 匹配时优先使用“应用 CTM 后的可视边界”，这样和前端编辑坐标系一致。
+     */
+    private double[] parseBoundaryForMatch(Element e) {
+        double[] raw = parseBoundaryAttr(e);
+        if (raw == null) return null;
+        String ctm = getAttrIgnoreNs(e, "CTM");
+        if (ctm == null || ctm.isBlank()) return raw;
+
+        List<Double> nums = extractNumbers(ctm);
+        if (nums.size() < 6) return raw;
+        double a = nums.get(0), b = nums.get(1), c = nums.get(2);
+        double d = nums.get(3), tx = nums.get(4), ty = nums.get(5);
+
+        double x = raw[0], y = raw[1], w = raw[2], h = raw[3];
+        double[] p1 = applyCtm(a, b, c, d, tx, ty, x, y);
+        double[] p2 = applyCtm(a, b, c, d, tx, ty, x + w, y);
+        double[] p3 = applyCtm(a, b, c, d, tx, ty, x, y + h);
+        double[] p4 = applyCtm(a, b, c, d, tx, ty, x + w, y + h);
+
+        double minX = Math.min(Math.min(p1[0], p2[0]), Math.min(p3[0], p4[0]));
+        double minY = Math.min(Math.min(p1[1], p2[1]), Math.min(p3[1], p4[1]));
+        double maxX = Math.max(Math.max(p1[0], p2[0]), Math.max(p3[0], p4[0]));
+        double maxY = Math.max(Math.max(p1[1], p2[1]), Math.max(p3[1], p4[1]));
+        return new double[]{minX, minY, Math.max(0, maxX - minX), Math.max(0, maxY - minY)};
+    }
+
+    private double[] applyCtm(double a, double b, double c, double d, double tx, double ty, double x, double y) {
+        return new double[]{a * x + c * y + tx, b * x + d * y + ty};
     }
 
     // ---- 修改逻辑 ----
@@ -397,6 +436,11 @@ public class OfdRebuildService {
                 Element fc = (Element) fillColors.item(0);
                 setAttrIgnoreNs(fc, "Value",
                         rgb[0] + " " + rgb[1] + " " + rgb[2]);
+            } else {
+                Element fc = doc.createElement("FillColor");
+                setAttrIgnoreNs(fc, "Value",
+                        rgb[0] + " " + rgb[1] + " " + rgb[2]);
+                textObj.appendChild(fc);
             }
             // 找 DefaultFillColor（部分OFD）
             NodeList defaultFills = getElementsByLocalName(textObj, "DefaultFillColor");
@@ -405,9 +449,45 @@ public class OfdRebuildService {
                 setAttrIgnoreNs(fc, "Value",
                         rgb[0] + " " + rgb[1] + " " + rgb[2]);
             }
+            // 找 DefaultAppearance/FillColor（部分OFD）
+            NodeList daNodes = getElementsByLocalName(textObj, "DefaultAppearance");
+            if (daNodes.getLength() > 0 && daNodes.item(0) instanceof Element daEl) {
+                NodeList daFills = getElementsByLocalName(daEl, "FillColor");
+                if (daFills.getLength() > 0) {
+                    Element fc = (Element) daFills.item(0);
+                    setAttrIgnoreNs(fc, "Value",
+                            rgb[0] + " " + rgb[1] + " " + rgb[2]);
+                } else {
+                    Element fc = doc.createElement("FillColor");
+                    setAttrIgnoreNs(fc, "Value",
+                            rgb[0] + " " + rgb[1] + " " + rgb[2]);
+                    daEl.appendChild(fc);
+                }
+            }
         } catch (Exception e) {
             log.warn("更新颜色失败: {}", e.getMessage());
         }
+    }
+
+    private void updateTextItalic(Document doc, Element textObj, boolean italic) {
+        String value = italic ? "true" : "false";
+        setAttrIgnoreNs(textObj, "Italic", value);
+        NodeList fontNodes = getElementsByLocalName(textObj, "Font");
+        if (fontNodes.getLength() > 0) {
+            for (int i = 0; i < fontNodes.getLength(); i++) {
+                if (fontNodes.item(i) instanceof Element fontEl) {
+                    setAttrIgnoreNs(fontEl, "Italic", value);
+                }
+            }
+        } else {
+            Element fontEl = doc.createElement("Font");
+            setAttrIgnoreNs(fontEl, "Italic", value);
+            textObj.appendChild(fontEl);
+        }
+    }
+
+    private void updateTextRotation(Element textObj, double rotation) {
+        setAttrIgnoreNs(textObj, "Rotate", String.format(Locale.ROOT, "%.3f", rotation));
     }
 
     private int[] hexToRgb(String hex) {
@@ -525,6 +605,20 @@ public class OfdRebuildService {
 
     private double nvl(Double v) {
         return v == null ? 0.0 : v;
+    }
+
+    private List<Double> extractNumbers(String s) {
+        List<Double> result = new ArrayList<>();
+        if (s == null) return result;
+        java.util.regex.Matcher matcher =
+                java.util.regex.Pattern.compile("-?\\d+\\.?\\d*").matcher(s);
+        while (matcher.find()) {
+            try {
+                result.add(Double.parseDouble(matcher.group()));
+            } catch (Exception ignore) {
+            }
+        }
+        return result;
     }
 
     // =========================================================
@@ -650,7 +744,7 @@ public class OfdRebuildService {
     /**
      * 更新一条注释（先按坐标匹配删除旧节点，再追加新节点）
      */
-    public void updateAnnotationInOfd(String fileId, AnnotationDTO updated) throws Exception {
+    public void updateAnnotationInOfd(String fileId, AnnotationDTO oldAnnotation, AnnotationDTO updated) throws Exception {
         byte[] originalOfd = cacheService.get(fileId);
         if (originalOfd == null) {
             throw new IllegalStateException("缓存中找不到文件: " + fileId);
@@ -675,9 +769,10 @@ public class OfdRebuildService {
         Document doc = parseXml(xmlBytes);
         Element root = doc.getDocumentElement();
 
-        // 按坐标近似匹配删除旧节点
-        removeNodeByPosition(root, updated.getX(), updated.getY(),
-                updated.getWidth(), updated.getHeight());
+        // 按旧坐标近似匹配删除旧节点，避免先更新坐标后删不到原节点
+        AnnotationDTO removeTarget = oldAnnotation != null ? oldAnnotation : updated;
+        removeNodeByPosition(root, removeTarget.getX(), removeTarget.getY(),
+                removeTarget.getWidth(), removeTarget.getHeight());
 
         // 追加新节点
         Element annEl = createAnnotationElement(doc, updated);
@@ -811,6 +906,9 @@ public class OfdRebuildService {
     private Element createPathElement(Document doc, AnnotationDTO ann) {
         Element el = doc.createElement("PathObject");
         setBoundaryAttr(el, ann);
+        if (isNotBlank(ann.getType())) {
+            el.setAttribute("Type", ann.getType());
+        }
 
         if (ann.getLineWidth() != null && ann.getLineWidth() > 0) {
             el.setAttribute("LineWidth",
@@ -831,8 +929,10 @@ public class OfdRebuildService {
 
         if (isNotBlank(ann.getPathPoints())) {
             Element abbrev = doc.createElement("AbbreviatedData");
-            abbrev.setTextContent(ann.getPathPoints());
+            String ofdPath = annotationPathPointsToOfdPath(ann.getPathPoints(), ann.getType());
+            abbrev.setTextContent(isNotBlank(ofdPath) ? ofdPath : ann.getPathPoints());
             el.appendChild(abbrev);
+            el.setAttribute("PathPoints", ann.getPathPoints());
         }
 
         return el;
@@ -912,6 +1012,42 @@ public class OfdRebuildService {
         } catch (Exception e) {
             return "0 0 0";
         }
+    }
+
+    private String annotationPathPointsToOfdPath(String pathPointsJson, String annType) {
+        if (!isNotBlank(pathPointsJson)) return null;
+        List<double[]> points = parsePointPairs(pathPointsJson);
+        if (points.isEmpty()) return null;
+
+        StringBuilder sb = new StringBuilder();
+        double[] first = points.get(0);
+        sb.append(String.format(Locale.ROOT, "M %.3f %.3f", first[0], first[1]));
+        for (int i = 1; i < points.size(); i++) {
+            double[] p = points.get(i);
+            sb.append(String.format(Locale.ROOT, " L %.3f %.3f", p[0], p[1]));
+        }
+        if ("RECTANGLE".equals(annType) || "CIRCLE".equals(annType)) {
+            sb.append(" C");
+        }
+        return sb.toString();
+    }
+
+    private List<double[]> parsePointPairs(String json) {
+        List<double[]> out = new ArrayList<>();
+        if (!isNotBlank(json)) return out;
+        try {
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("\\[\\s*(-?\\d+(?:\\.\\d+)?)\\s*,\\s*(-?\\d+(?:\\.\\d+)?)\\s*\\]")
+                    .matcher(json);
+            while (m.find()) {
+                out.add(new double[]{
+                        Double.parseDouble(m.group(1)),
+                        Double.parseDouble(m.group(2))
+                });
+            }
+        } catch (Exception ignore) {
+        }
+        return out;
     }
     private void addTextElementFallback(org.ofdrw.layout.VirtualPage vPage, ElementDTO element) {
         if (element == null || !"TEXT".equals(element.getType())) return;
