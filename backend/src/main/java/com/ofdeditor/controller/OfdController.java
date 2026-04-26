@@ -95,8 +95,10 @@ public class OfdController {
             }
 
             if (originalOfd == null) {
-                log.warn("原始OFD缓存不存在或已过期, fileId={}, 降级为重建模式",
+                log.warn("原始OFD缓存不存在或已过期, fileId={}, 拒绝降级重建以避免内容丢失",
                         documentDTO.getFileId());
+                return ResponseEntity.badRequest().body(
+                        "文件缓存已失效（可能是后端重启或会话超时），请重新上传原始OFD后再保存。");
             }
 
             byte[] ofdBytes = rebuildService.rebuildOfd(documentDTO, originalOfd);

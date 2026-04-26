@@ -6,6 +6,8 @@ import lombok.Data;
 @Data
 public class ElementDTO {
     private String id;
+    // OFD 内部对象ID（用于精确回写匹配）
+    private String xmlObjId;
     private Boolean skip;
     // TEXT / IMAGE / PATH
     private String type;

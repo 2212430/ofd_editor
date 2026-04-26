@@ -30,6 +30,7 @@ export type ToolType =
 // ========== OFD原生元素（保持不变） ==========
 export interface ElementData {
     id: string
+    xmlObjId?: string
     type: OfdElementType
     x: number
     y: number

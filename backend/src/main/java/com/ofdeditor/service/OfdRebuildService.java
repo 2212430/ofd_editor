@@ -118,7 +118,9 @@ public class OfdRebuildService {
 
         // 找所有页面Content.xml路径（兼容各种OFD结构）
         List<String> pageXmlPaths = findPageContentXmlPaths(zipEntries);
+        List<String> templateXmlPaths = findTemplateContentXmlPaths(zipEntries);
         log.info("找到 {} 个页面XML", pageXmlPaths.size());
+        log.info("找到 {} 个模板XML", templateXmlPaths.size());
 
         for (int pageIdx = 0; pageIdx < pageXmlPaths.size(); pageIdx++) {
             String xmlPath = pageXmlPaths.get(pageIdx);
@@ -129,12 +131,20 @@ public class OfdRebuildService {
                 continue;
             }
 
-            byte[] xmlBytes = zipEntries.get(xmlPath);
-            if (xmlBytes == null) continue;
+            LinkedHashSet<String> targets = new LinkedHashSet<>();
+            targets.add(xmlPath);
+            // 模板层文本也在前端可编辑，这里一并尝试严格匹配更新
+            targets.addAll(templateXmlPaths);
 
-            byte[] patchedXml = patchOnePageXml(xmlBytes, dirtyOnThisPage);
-            zipEntries.put(xmlPath, patchedXml);
-            log.info("第{}页XML已修改: {}", pageIdx + 1, xmlPath);
+            int touched = 0;
+            for (String targetPath : targets) {
+                byte[] xmlBytes = zipEntries.get(targetPath);
+                if (xmlBytes == null) continue;
+                byte[] patchedXml = patchOnePageXml(xmlBytes, dirtyOnThisPage);
+                zipEntries.put(targetPath, patchedXml);
+                touched++;
+            }
+            log.info("第{}页关联XML已处理: {} 个", pageIdx + 1, touched);
         }
     }
 
@@ -179,6 +189,20 @@ public class OfdRebuildService {
         return 0;
     }
 
+    private List<String> findTemplateContentXmlPaths(Map<String, byte[]> zipEntries) {
+        List<String> result = new ArrayList<>();
+        for (String key : zipEntries.keySet()) {
+            String normalized = key.replace("\\", "/");
+            if (!normalized.endsWith("Content.xml")) continue;
+            if (normalized.contains("/Annots/")) continue;
+            if (normalized.contains("/Tpls/") || normalized.contains("/Tpl/") || normalized.contains("/tpl")) {
+                result.add(key);
+            }
+        }
+        result.sort(Comparator.naturalOrder());
+        return result;
+    }
+
     /**
      * 修改单页XML：找到匹配的TextObject节点，更新内容
      */
@@ -215,42 +239,78 @@ public class OfdRebuildService {
     private void patchTextElement(Document doc, Element root, ElementDTO el) {
         // 找所有 TextObject 节点
         NodeList nodes = getElementsByLocalName(root, "TextObject");
-        Element matched = findBestMatchByBoundary(nodes, el);
-
-        if (matched == null) {
+        List<Element> matchedNodes = new ArrayList<>();
+        boolean matchedByXmlObjId = false;
+        if (isNotBlank(el.getXmlObjId())) {
+            Element idMatched = findByXmlObjId(nodes, el.getXmlObjId());
+            if (idMatched != null) {
+                matchedNodes.add(idMatched);
+                matchedByXmlObjId = true;
+            }
+        }
+        if (matchedNodes.isEmpty()) {
+            matchedNodes = findTextMatchesByBoundary(nodes, el);
+        }
+        if (matchedNodes.isEmpty()) {
+            matchedNodes = findTextMatchesByContent(nodes, el);
+        }
+        // 仅按坐标/内容模糊匹配时扩展同文案与区域，避免误改叠层；xmlObjId 命中则只改这一处 XML 节点
+        if (!matchedByXmlObjId) {
+            matchedNodes = expandBySameContent(nodes, matchedNodes, el);
+            if (matchedNodes.size() <= 1) {
+                matchedNodes = expandByRegion(nodes, matchedNodes, el);
+            }
+        }
+        if (matchedNodes.isEmpty()) {
             log.warn("TEXT元素未找到匹配节点: id={}, x={}, y={}", el.getId(), el.getOriginalX(), el.getOriginalY());
             return;
         }
 
-        // 1. 修改 Boundary（位置/尺寸）
-        if (isPositionChanged(el)) {
-            updateBoundaryAttr(matched, el);
-        }
+        for (Element matched : matchedNodes) {
+            // 1. 修改几何（位置/尺寸/旋转）
+            updateTextGeometry(matched, el);
 
-        // 2. 修改文本内容
-        if (el.getContent() != null) {
-            updateTextContent(doc, matched, el.getContent());
-        }
+            // 2. 修改文本内容
+            if (el.getContent() != null) {
+                updateTextContent(doc, matched, el.getContent());
+            }
 
-        // 3. 修改字体大小
-        if (el.getFontSize() != null) {
-            updateFontSize(matched, el.getFontSize());
-        }
+            // 3. 修改字体大小
+            if (el.getFontSize() != null) {
+                updateFontSize(matched, el.getFontSize());
+            }
 
-        // 4. 修改颜色
-        if (el.getColor() != null) {
-            updateTextColor(doc, matched, el.getColor());
+            // 4. 修改颜色
+            if (el.getColor() != null) {
+                updateTextColor(doc, matched, el.getColor());
+            }
+            // 5. 修改斜体
+            if (el.getItalic() != null) {
+                updateTextItalic(doc, matched, el.getItalic());
+            }
         }
-        // 5. 修改斜体
-        if (el.getItalic() != null) {
-            updateTextItalic(doc, matched, el.getItalic());
-        }
-        // 6. 修改旋转角度
-        if (el.getRotation() != null) {
-            updateTextRotation(matched, el.getRotation());
-        }
+        log.info("TEXT节点已修改: matches={}, content={}, color={}, rotation={}",
+                matchedNodes.size(), el.getContent(), el.getColor(), el.getRotation());
+    }
 
-        log.debug("TEXT节点已修改: content={}", el.getContent());
+    private Element findByXmlObjId(NodeList nodes, String xmlObjId) {
+        if (!isNotBlank(xmlObjId)) return null;
+        String target = xmlObjId.trim();
+        for (int i = 0; i < nodes.getLength(); i++) {
+            Node n = nodes.item(i);
+            if (!(n instanceof Element e)) continue;
+            String id = firstNonBlank(
+                    getAttrIgnoreNs(e, "ID"),
+                    getAttrIgnoreNs(e, "Id"),
+                    getAttrIgnoreNs(e, "id"),
+                    getAttrIgnoreNs(e, "ObjID"),
+                    getAttrIgnoreNs(e, "ObjectID")
+            );
+            if (isNotBlank(id) && target.equals(id.trim())) {
+                return e;
+            }
+        }
+        return null;
     }
 
     private void patchImageElement(Document doc, Element root, ElementDTO el) {
@@ -326,6 +386,140 @@ public class OfdRebuildService {
         return bestMatch;
     }
 
+    private List<Element> findTextMatchesByBoundary(NodeList nodes, ElementDTO el) {
+        List<Element> matches = new ArrayList<>();
+        double ox = el.getOriginalX() != null ? el.getOriginalX() :
+                (el.getX() != null ? el.getX() : 0);
+        double oy = el.getOriginalY() != null ? el.getOriginalY() :
+                (el.getY() != null ? el.getY() : 0);
+        double ow = el.getOriginalWidth() != null ? el.getOriginalWidth() :
+                (el.getWidth() != null ? el.getWidth() : 0);
+        double oh = el.getOriginalHeight() != null ? el.getOriginalHeight() :
+                (el.getHeight() != null ? el.getHeight() : 0);
+
+        double bestScore = Double.MAX_VALUE;
+        Element best = null;
+        for (int i = 0; i < nodes.getLength(); i++) {
+            Node n = nodes.item(i);
+            if (!(n instanceof Element e)) continue;
+            double[] boundary = parseBoundaryForMatch(e);
+            if (boundary == null) continue;
+            double score = Math.abs(boundary[0] - ox)
+                    + Math.abs(boundary[1] - oy)
+                    + Math.abs(boundary[2] - ow)
+                    + Math.abs(boundary[3] - oh);
+            if (score <= 2.0) {
+                matches.add(e);
+            }
+            if (score < bestScore) {
+                bestScore = score;
+                best = e;
+            }
+        }
+        if (matches.isEmpty() && best != null && bestScore <= 2.0) {
+            matches.add(best);
+        }
+        return matches;
+    }
+
+    private List<Element> findTextMatchesByContent(NodeList nodes, ElementDTO el) {
+        List<Element> matches = new ArrayList<>();
+        String target = normalizeText(el.getContent());
+        if (target.isEmpty()) return matches;
+
+        double ox = nvl(el.getOriginalX());
+        double oy = nvl(el.getOriginalY());
+        double bestDist = Double.MAX_VALUE;
+        Element best = null;
+
+        for (int i = 0; i < nodes.getLength(); i++) {
+            Node n = nodes.item(i);
+            if (!(n instanceof Element e)) continue;
+            String text = normalizeText(readTextContent(e));
+            if (!target.equals(text)) continue;
+
+            double[] boundary = parseBoundaryForMatch(e);
+            if (boundary == null) continue;
+            double dist = Math.abs(boundary[0] - ox) + Math.abs(boundary[1] - oy);
+            if (dist <= 20.0) {
+                matches.add(e);
+            }
+            if (dist < bestDist) {
+                bestDist = dist;
+                best = e;
+            }
+        }
+        if (matches.isEmpty() && best != null) {
+            matches.add(best);
+        }
+        return matches;
+    }
+
+    private String readTextContent(Element textObj) {
+        StringBuilder sb = new StringBuilder();
+        NodeList textCodes = getElementsByLocalName(textObj, "TextCode");
+        for (int i = 0; i < textCodes.getLength(); i++) {
+            String t = textCodes.item(i).getTextContent();
+            if (t != null) sb.append(t);
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 处理同内容叠层文本：把同内容节点一并更新，确保显示层也同步生效。
+     */
+    private List<Element> expandBySameContent(NodeList nodes, List<Element> seeds, ElementDTO el) {
+        if (seeds.isEmpty()) return seeds;
+        LinkedHashSet<Element> result = new LinkedHashSet<>(seeds);
+
+        String target = normalizeText(el.getContent());
+        if (target.isEmpty()) return new ArrayList<>(result);
+        for (int i = 0; i < nodes.getLength(); i++) {
+            Node n = nodes.item(i);
+            if (!(n instanceof Element e)) continue;
+            if (!target.equals(normalizeText(readTextContent(e)))) continue;
+            result.add(e);
+        }
+        return new ArrayList<>(result);
+    }
+
+    /**
+     * 文本可能按字拆成多个 TextObject，若只命中1个则按区域补齐同块文本。
+     */
+    private List<Element> expandByRegion(NodeList nodes, List<Element> seeds, ElementDTO el) {
+        if (seeds.isEmpty()) return seeds;
+        LinkedHashSet<Element> result = new LinkedHashSet<>(seeds);
+        double ox = nvl(el.getOriginalX());
+        double oy = nvl(el.getOriginalY());
+        double ow = nvl(el.getOriginalWidth());
+        double oh = nvl(el.getOriginalHeight());
+        if (ow <= 0 || oh <= 0) return new ArrayList<>(result);
+
+        double x1 = ox - 2.0, y1 = oy - 2.0;
+        double x2 = ox + ow + 2.0, y2 = oy + oh + 2.0;
+        for (int i = 0; i < nodes.getLength(); i++) {
+            Node n = nodes.item(i);
+            if (!(n instanceof Element e)) continue;
+            double[] b = parseBoundaryForMatch(e);
+            if (b == null) continue;
+            double bx1 = b[0], by1 = b[1], bx2 = b[0] + b[2], by2 = b[1] + b[3];
+            boolean overlap = bx2 >= x1 && bx1 <= x2 && by2 >= y1 && by1 <= y2;
+            if (overlap) {
+                result.add(e);
+            }
+        }
+        return new ArrayList<>(result);
+    }
+
+    private String normalizeText(String s) {
+        if (s == null) return "";
+        return s
+                .replace('\u00A0', ' ')
+                .replace('\u3000', ' ')
+                .replaceAll("\\s+", "")
+                .trim();
+    }
+
     /**
      * 解析 Boundary 属性，格式："x y w h"
      */
@@ -398,6 +592,77 @@ public class OfdRebuildService {
         log.debug("更新Boundary: {}", newBoundary);
     }
 
+    /**
+     * 文本几何写回：
+     * 1) 对含 CTM 的文本，优先更新 CTM 平移/旋转（保证和前端可视坐标一致）
+     * 2) 对无 CTM 的文本，回退到 Boundary/Rotate 属性
+     */
+    private void updateTextGeometry(Element textObj, ElementDTO el) {
+        boolean posChanged = isPositionChanged(el);
+        boolean rotationChanged = el.getRotation() != null
+                && Math.abs(nvl(el.getRotation()) - nvl(el.getOriginalRotation())) > 0.001;
+        boolean sizeChanged = Math.abs(nvl(el.getWidth()) - nvl(el.getOriginalWidth())) > 0.001
+                || Math.abs(nvl(el.getHeight()) - nvl(el.getOriginalHeight())) > 0.001;
+        if (!posChanged && !rotationChanged && !sizeChanged) return;
+
+        String ctmAttr = getAttrIgnoreNs(textObj, "CTM");
+        List<Double> ctm = extractNumbers(ctmAttr);
+        if (ctm.size() >= 6) {
+            double a = ctm.get(0), b = ctm.get(1), c = ctm.get(2);
+            double d = ctm.get(3), tx = ctm.get(4), ty = ctm.get(5);
+
+            if (rotationChanged) {
+                double targetRad = Math.toRadians(nvl(el.getRotation()));
+                double sx = Math.hypot(a, b);
+                double sy = Math.hypot(c, d);
+                if (!Double.isFinite(sx) || sx <= 0) sx = 1.0;
+                if (!Double.isFinite(sy) || sy <= 0) sy = 1.0;
+                a = sx * Math.cos(targetRad);
+                b = sx * Math.sin(targetRad);
+                c = -sy * Math.sin(targetRad);
+                d = sy * Math.cos(targetRad);
+            }
+            if (posChanged) {
+                double dx = nvl(el.getX()) - nvl(el.getOriginalX());
+                double dy = nvl(el.getY()) - nvl(el.getOriginalY());
+                tx += dx;
+                ty += dy;
+            }
+            setAttrIgnoreNs(textObj, "CTM",
+                    String.format(Locale.ROOT, "%.6f %.6f %.6f %.6f %.6f %.6f", a, b, c, d, tx, ty));
+
+            if (sizeChanged) {
+                updateBoundarySizeOnly(textObj, el);
+            }
+            return;
+        }
+
+        if (posChanged || sizeChanged) {
+            updateBoundaryAttr(textObj, el);
+        }
+        if (rotationChanged) {
+            updateTextRotation(textObj, el.getRotation());
+        }
+    }
+
+    /**
+     * 仅更新 Boundary 尺寸，避免在 CTM 场景下把可视坐标直接写进 Boundary 导致偏移。
+     */
+    private void updateBoundarySizeOnly(Element textObj, ElementDTO el) {
+        double[] oldBoundary = parseBoundaryAttr(textObj);
+        if (oldBoundary == null) return;
+        double ow = nvl(el.getOriginalWidth());
+        double oh = nvl(el.getOriginalHeight());
+        if (ow <= 0 || oh <= 0) return;
+        double scaleW = nvl(el.getWidth()) / ow;
+        double scaleH = nvl(el.getHeight()) / oh;
+        double newW = oldBoundary[2] * (Double.isFinite(scaleW) && scaleW > 0 ? scaleW : 1.0);
+        double newH = oldBoundary[3] * (Double.isFinite(scaleH) && scaleH > 0 ? scaleH : 1.0);
+        String newBoundary = String.format(Locale.ROOT, "%.3f %.3f %.3f %.3f",
+                oldBoundary[0], oldBoundary[1], newW, newH);
+        setAttrIgnoreNs(textObj, "Boundary", newBoundary);
+    }
+
     private void updateTextContent(Document doc, Element textObj, String newContent) {
         // 找所有 TextCode 节点
         NodeList textCodes = getElementsByLocalName(textObj, "TextCode");
@@ -430,17 +695,33 @@ public class OfdRebuildService {
             int[] rgb = hexToRgb(hexColor);
             if (rgb == null) return;
 
+            // 某些 OFD 使用 DrawParam 样式资源覆盖文本颜色；移除后使用本节点显式颜色。
+            removeAttrIfExists(textObj, "DrawParam");
+            removeAttrIfExists(textObj, "DrawParamID");
+            removeAttrIfExists(textObj, "DrawParamRef");
+
             // 找 FillColor 节点
             NodeList fillColors = getElementsByLocalName(textObj, "FillColor");
             if (fillColors.getLength() > 0) {
-                Element fc = (Element) fillColors.item(0);
-                setAttrIgnoreNs(fc, "Value",
-                        rgb[0] + " " + rgb[1] + " " + rgb[2]);
+                for (int i = 0; i < fillColors.getLength(); i++) {
+                    if (fillColors.item(i) instanceof Element fc) {
+                        setAttrIgnoreNs(fc, "Value",
+                                rgb[0] + " " + rgb[1] + " " + rgb[2]);
+                    }
+                }
             } else {
                 Element fc = doc.createElement("FillColor");
                 setAttrIgnoreNs(fc, "Value",
                         rgb[0] + " " + rgb[1] + " " + rgb[2]);
                 textObj.appendChild(fc);
+            }
+            setAttrIgnoreNs(textObj, "FillColor", rgb[0] + " " + rgb[1] + " " + rgb[2]);
+            // 有些 OFD 引擎在 TextCode 级别读取颜色
+            NodeList textCodes = getElementsByLocalName(textObj, "TextCode");
+            for (int i = 0; i < textCodes.getLength(); i++) {
+                if (textCodes.item(i) instanceof Element tcEl) {
+                    setAttrIgnoreNs(tcEl, "FillColor", rgb[0] + " " + rgb[1] + " " + rgb[2]);
+                }
             }
             // 找 DefaultFillColor（部分OFD）
             NodeList defaultFills = getElementsByLocalName(textObj, "DefaultFillColor");
@@ -466,6 +747,16 @@ public class OfdRebuildService {
             }
         } catch (Exception e) {
             log.warn("更新颜色失败: {}", e.getMessage());
+        }
+    }
+
+    private void removeAttrIfExists(Element e, String attrName) {
+        if (e == null || attrName == null) return;
+        for (String prefix : new String[]{"", "ofd:", "ofd2:", "doc:"}) {
+            String full = prefix + attrName;
+            if (e.hasAttribute(full)) {
+                e.removeAttribute(full);
+            }
         }
     }
 
@@ -605,6 +896,14 @@ public class OfdRebuildService {
 
     private double nvl(Double v) {
         return v == null ? 0.0 : v;
+    }
+
+    private String firstNonBlank(String... vals) {
+        if (vals == null) return null;
+        for (String v : vals) {
+            if (v != null && !v.trim().isEmpty()) return v.trim();
+        }
+        return null;
     }
 
     private List<Double> extractNumbers(String s) {

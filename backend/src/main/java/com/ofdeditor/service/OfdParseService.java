@@ -904,6 +904,13 @@ public class OfdParseService {
 
         ElementDTO dto = new ElementDTO();
         dto.setId(UUID.randomUUID().toString());
+        dto.setXmlObjId(firstNonBlank(
+                el.getAttribute("ID"),
+                el.getAttribute("Id"),
+                el.getAttribute("id"),
+                el.getAttribute("ObjID"),
+                el.getAttribute("ObjectID")
+        ));
         dto.setX(x); dto.setY(y);
         dto.setWidth(safeSize(w, 1.0));
         dto.setHeight(safeSize(h, 1.0));
@@ -917,6 +924,7 @@ public class OfdParseService {
             case "TextObject", "CT_Text" -> {
                 dto.setType("TEXT");
                 parseTextFromDom(el, dto);
+                if (ctm != null) dto.setRotation(extractRotationFromMatrix(ctm));
                 if (dto.getWidth() <= 0) dto.setWidth(80.0);
                 if (dto.getHeight() <= 0) dto.setHeight(18.0);
             }
@@ -1020,8 +1028,11 @@ public class OfdParseService {
         dto.setItalic(false);
         String rotate = firstNonBlank(el.getAttribute("Rotate"), el.getAttribute("rotate"));
         Double rotation = tryParseDouble(rotate);
-        if (rotation != null) {
-            dto.setRotation(rotation);
+        if (rotation != null) dto.setRotation(rotation);
+        String ctmStr = firstNonBlank(el.getAttribute("CTM"), el.getAttribute("ctm"));
+        Matrix ctm = parseCTMString(ctmStr);
+        if (ctm != null) {
+            dto.setRotation(extractRotationFromMatrix(ctm));
         }
     }
 
@@ -1215,11 +1226,18 @@ public class OfdParseService {
 
         ElementDTO dto = new ElementDTO();
         dto.setId(UUID.randomUUID().toString());
+        dto.setXmlObjId(firstNonBlank(
+                invokeStringAny(block, "getID"),
+                invokeStringAny(block, "getId"),
+                invokeStringAny(block, "getObjID"),
+                invokeStringAny(block, "getObjectID")
+        ));
         dto.setRotation(0.0);
         dto.setScaleX(1.0);
         dto.setScaleY(1.0);
         dto.setIsDirty(false);
         if (ctm != null) dto.setCtm(ctm.toString());
+        if (ctm != null) dto.setRotation(extractRotationFromMatrix(ctm));
 
         dto.setX(finalRect.x);
         dto.setY(finalRect.y);
@@ -1978,6 +1996,14 @@ public class OfdParseService {
     }
 
     private String buildElementFingerprint(ElementDTO d) {
+        if ("TEXT".equals(d.getType())) {
+            // 文本去重不使用CTM，避免模板DOM与ofdrw反射对象因矩阵表达差异产生重复叠层
+            return String.join("|",
+                    safeStr(d.getType()),
+                    safeStr(d.getContent()),
+                    q(d.getX()), q(d.getY()), q(d.getWidth()), q(d.getHeight())
+            );
+        }
         return String.join("|",
                 safeStr(d.getType()),
                 safeStr(d.getResourceId()),
@@ -1993,6 +2019,16 @@ public class OfdParseService {
     }
 
     private String safeStr(String s) { return s == null ? "" : s.trim(); }
+
+    private double extractRotationFromMatrix(Matrix m) {
+        if (m == null) return 0.0;
+        double rad = Math.atan2(m.b, m.a);
+        double deg = Math.toDegrees(rad);
+        if (!Double.isFinite(deg)) return 0.0;
+        if (deg > 180.0) deg -= 360.0;
+        if (deg < -180.0) deg += 360.0;
+        return deg;
+    }
 
     private boolean isLikelyOfdPathData(String pathData) {
         if (!isNotBlank(pathData)) return false;
