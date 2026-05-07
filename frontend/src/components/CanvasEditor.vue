@@ -903,21 +903,41 @@ function getPathData(element: ElementData): string {
 
 function getTextConfig(element: ElementData) {
   const isSelected = store.selectedElementId === element.id
+  const content    = element.content ?? ''
+  const hasNl      = content.includes('\n')
+  const fsMm       = element.fontSize ?? 3
+  const hMm        = element.height ?? 0
+
+  let fsPx = fsMm * MM_TO_PX * store.scale
+  const hPx = hMm > 0 ? hMm * MM_TO_PX * store.scale : 0
+  /** 单行条带：/ofdrw 字号偶发偏小，用外接框高度抬到可读下限；避免误判导致“微尘字” */
+  if (!hasNl && hPx > 2) {
+    fsPx = Math.min(hPx * 0.94, Math.max(fsPx, hPx * 0.56))
+  }
+
+  const fontStack = [element.fontFamily, 'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', 'sans-serif']
+      .filter((x): x is string => typeof x === 'string' && x.length > 0)
+      .join(', ')
+
   return {
-    id:          element.id,
-    x:           s(element.x),
-    y:           s(element.y),
-    width:       s(element.width),
-    height:      s(element.height),
-    rotation:    element.rotation ?? 0,
-    draggable:   !store.isAnnotationTool,
-    text:        element.content  ?? '',
-    fontSize:    (element.fontSize ?? 3) * MM_TO_PX * store.scale,
-    fontFamily:  element.fontFamily ?? 'sans-serif',
-    fontStyle:   `${element.bold ? 'bold' : 'normal'} ${element.italic ? 'italic' : ''}`.trim(),
-    fill:        element.color    ?? '#000000',
-    stroke:      isSelected ? '#1a73e8' : undefined,
-    strokeWidth: isSelected ? 0.5 : 0,
+    id:             element.id,
+    x:              s(element.x),
+    y:              s(element.y),
+    rotation:       element.rotation ?? 0,
+    draggable:      !store.isAnnotationTool,
+    text:           content,
+    fontSize:       fsPx,
+    lineHeight:     hasNl ? 1.25 : 1.15,
+    fontFamily:     fontStack,
+    fontStyle:      `${element.bold ? 'bold' : 'normal'} ${element.italic ? 'italic' : ''}`.trim(),
+    align:          'left',
+    verticalAlign:  'top',
+    /** 永远不绑 width/height：Konva 在有限宽度内排版会裁出假「断字」，OFD 又多是窄盒单行 */
+    wrap:           'none' as const,
+    ellipsis:       false,
+    fill:           element.color    ?? '#000000',
+    stroke:         isSelected ? '#1a73e8' : undefined,
+    strokeWidth:    isSelected ? 0.5 : 0,
   }
 }
 
@@ -925,18 +945,34 @@ function getPathConfig(element: ElementData) {
   const e          = element as any
   const isSelected = store.selectedElementId === element.id
   const sc         = MM_TO_PX * store.scale
+  // OFD 矢量：纯填充/纯描边由 path*Enabled 与线宽控制；无描边时不得强制灰色描边
+  const strokeOff  = e.pathStrokeEnabled === false
+  const fillOff    = e.pathFillEnabled === false
+  const lw         = (typeof e.lineWidth === 'number' && e.lineWidth > 0) ? e.lineWidth : 0
+  const hasStrokeColor = isNotEmptyStr(e.strokeColor)
+  const canStroke  = !strokeOff && (lw > 0 || hasStrokeColor)
+  const strokeW    = isSelected
+      ? 2 / sc
+      : (strokeOff ? 0 : (lw > 0 ? lw : (hasStrokeColor ? 0.3 : 0)))
+  const strokeCol  = isSelected
+      ? '#1a73e8'
+      : (strokeOff || (strokeW <= 0 && !isSelected) ? undefined : (e.strokeColor || '#222222'))
   return {
-    id:          element.id,
-    x: 0, y: 0,
-    scaleX: sc, scaleY: sc,
-    rotation:    element.rotation ?? 0,
-    draggable:   !store.isAnnotationTool,
-    data:        getPathData(element),
-    fill:        e.fillColor   ?? 'transparent',
-    stroke:      isSelected ? '#1a73e8' : (e.strokeColor ?? '#222222'),
-    strokeWidth: isSelected ? (2 / sc) : ((e.lineWidth ?? 0.3) / sc * 0.5),
+    id:                 element.id,
+    x:                  0, y: 0,
+    scaleX:             sc, scaleY: sc,
+    rotation:           element.rotation ?? 0,
+    draggable:          !store.isAnnotationTool,
+    data:               getPathData(element),
+    fill:               fillOff ? 'transparent' : (e.fillColor ?? 'transparent'),
+    stroke:             strokeCol,
+    strokeWidth:        strokeW,
     strokeScaleEnabled: false,
   }
+}
+
+function isNotEmptyStr(s: unknown) {
+  return typeof s === 'string' && s.length > 0
 }
 
 function getImageConfig(element: ElementData) {

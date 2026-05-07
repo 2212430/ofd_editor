@@ -41,15 +41,19 @@ public class ElementDTO {
     private Double scaleX;
     private Double scaleY;
 
-    // ========== PATH相关 ==========
+    // ========== PATH相关（OFD 矢量 PathObject，对应 AbbreviatedData -> SVG d）==========
     // PATH数据（SVG path d）
     private String pathData;
-    // 填充颜色（新增）
+    // 填充颜色
     private String fillColor;
-    // 描边颜色（新增）
+    // 描边颜色
     private String strokeColor;
-    // 线宽（新增）
+    // 线宽
     private Double lineWidth;
+    /** 与 OFD 属性 {@code Fill} 一致；false 表示不填充、仅描边或透明 */
+    private Boolean pathFillEnabled;
+    /** 与 OFD 属性 {@code Stroke} 一致；false 表示不描边、仅填充 */
+    private Boolean pathStrokeEnabled;
 
     // ========== 图片相关 ==========
     // 图片资源ID

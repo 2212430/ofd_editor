@@ -49,6 +49,10 @@ export interface ElementData {
     fillColor?: string
     strokeColor?: string
     lineWidth?: number
+    /** 对应 OFD PathObject Fill；false 为不填充 */
+    pathFillEnabled?: boolean
+    /** 对应 OFD PathObject Stroke；false 为不描边 */
+    pathStrokeEnabled?: boolean
     resourceId?: string
     imageBase64?: string
     imageUrl?: string

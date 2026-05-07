@@ -394,12 +394,19 @@ public class OfdParseService {
 
         List<ElementDTO> elements = new ArrayList<>();
         try {
+            // 正文 TextObject 的填充色以 Content.xml 为准；ofdrw 反射常拿不到 → 易被当成黑字。
+            indexTextObjectFillColorsForPage(pageIndex, ctx);
+
             List<Object> roots = new ArrayList<>();
 
             // 1. 模板层（表格线、背景文字等）—— 直接从ZIP读
             parseTemplateLayer(pageIndex, roots, ctx);
 
-            // 2. 正文层
+            // 2a. 正文层 Content.xml 中的 PathObject / ImageObject（在 ofdrw 之前加入，保证叠放顺序：底图/矢量在下）
+            // 蓝底、色块等通常是全页 PathObject 填充，不是位图；仅补 Image 无法显示背景。
+            addPageGraphicsDomRootsFromContentXml(pageIndex, roots, ctx);
+
+            // 2b. 正文层 ofdrw
             Object pageObj = reader.getPage(pageNum);
             roots.add(pageObj);
             addIfNotNull(roots, invokeAny(pageObj,
@@ -496,6 +503,159 @@ public class OfdParseService {
             String name = e.getName();
             if (name.contains("Page_" + pageIndex) && name.endsWith("Content.xml")) {
                 return name;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 从当前页 {@code Content.xml} 按文档顺序收集 {@code PathObject} 与 {@code ImageObject}（及 CT 变体）DOM，
+     * 供 {@link #walk} → {@link #parseBlockFromDom} 解析。不含 {@code TextObject}，避免与 ofdrw 文本重复。
+     * <p>常见“整页蓝底/底色”是首个 {@code PathObject} 矢量填充，不是图片位图；厂商 OFD 在 ofdrw 中常缺失这些节点。</p>
+     */
+    private void addPageGraphicsDomRootsFromContentXml(int pageIndex, List<Object> roots, ParseContext ctx) {
+        if (ctx.zipFile == null) return;
+        try {
+            String pageContentPath = findPageContentPath(ctx.zipFile, pageIndex);
+            if (pageContentPath == null) return;
+            byte[] pageBytes = readZipEntry(ctx.zipFile, pageContentPath);
+            if (pageBytes == null || pageBytes.length == 0) return;
+
+            Document doc = parseXmlBytes(pageBytes);
+            Element top = doc.getDocumentElement();
+            if (top == null) return;
+            List<Object> ordered = new ArrayList<>();
+            collectPathAndImageDomInDocOrder(top, ordered);
+            if (ordered.isEmpty()) return;
+            for (Object o : ordered) {
+                roots.add(o);
+            }
+            log.info("【正文XML】第{}页 {} 加入 Path/Image 根节点: {} 个", pageIndex, pageContentPath, ordered.size());
+        } catch (Exception e) {
+            log.debug("addPageGraphicsDomRootsFromContentXml: {}", e.getMessage());
+        }
+    }
+
+    /** 深度优先、与 Content.xml 中出现顺序一致，只收集 PathObject / ImageObject（及 CT_Path、CT_Image）。 */
+    private void collectPathAndImageDomInDocOrder(Element el, List<Object> out) {
+        String local = elementLocalName(el);
+        if ("PathObject".equals(local) || "ImageObject".equals(local)
+                || "CT_Path".equals(local) || "CT_Image".equals(local)) {
+            out.add(el);
+        }
+        NodeList children = el.getChildNodes();
+        for (int i = 0; i < children.getLength(); i++) {
+            Node c = children.item(i);
+            if (c instanceof Element) {
+                collectPathAndImageDomInDocOrder((Element) c, out);
+            }
+        }
+    }
+
+    private String elementLocalName(Element el) {
+        String ln = el.getLocalName();
+        if (isNotBlank(ln)) return ln;
+        String nn = el.getNodeName();
+        if (nn != null && nn.contains(":")) {
+            return nn.substring(nn.indexOf(':') + 1);
+        }
+        return nn;
+    }
+
+    /**
+     * 遍历当前页 Content.xml，建立 {@code TextObject ID → #RRGGBB}，供 ofdrw 路径按 xmlObjId 覆盖 {@link ElementDTO#setColor}。
+     */
+    private void indexTextObjectFillColorsForPage(int pageIndex, ParseContext ctx) {
+        ctx.textFillHexByObjectIdPage.clear();
+        if (ctx.zipFile == null) return;
+        try {
+            String pageContentPath = findPageContentPath(ctx.zipFile, pageIndex);
+            if (pageContentPath == null) return;
+            byte[] pageBytes = readZipEntry(ctx.zipFile, pageContentPath);
+            if (pageBytes == null || pageBytes.length == 0) return;
+            Document doc = parseXmlBytes(pageBytes);
+            Element top = doc.getDocumentElement();
+            if (top == null) return;
+            indexTextObjectFillColorsRecursive(top, ctx);
+        } catch (Exception e) {
+            log.debug("indexTextObjectFillColorsForPage page={}: {}", pageIndex, e.getMessage());
+        }
+    }
+
+    private void indexTextObjectFillColorsRecursive(Element el, ParseContext ctx) {
+        String local = elementLocalName(el);
+        if ("TextObject".equals(local) || "CT_Text".equals(local)) {
+            String oid = firstNonBlank(
+                    el.getAttribute("ID"),
+                    el.getAttribute("Id"),
+                    el.getAttribute("id"),
+                    el.getAttribute("ObjID"),
+                    el.getAttribute("ObjectID"));
+            if (isNotBlank(oid)) {
+                String hex = extractTextFillColorHexFromElement(el);
+                if (isNotBlank(hex))
+                    ctx.textFillHexByObjectIdPage.put(oid.trim(), hex);
+            }
+        }
+        NodeList children = el.getChildNodes();
+        for (int i = 0; i < children.getLength(); i++) {
+            Node c = children.item(i);
+            if (c instanceof Element) indexTextObjectFillColorsRecursive((Element) c, ctx);
+        }
+    }
+
+    /** OFD {@code FillColor}：{@code Value}、子结点 {@code Color}、渐变 {@code Segment} 中的颜色。 */
+    private String paintColorHexFromElement(Element paintEl) {
+        if (paintEl == null) return null;
+        String vAttr = paintEl.getAttribute("Value");
+        if (isNotBlank(vAttr)) {
+            String h = parseRgbString(vAttr, null);
+            if (isNotBlank(h)) return h;
+        }
+        NodeList colorKids = paintEl.getElementsByTagNameNS("*", "Color");
+        if (colorKids.getLength() == 0) colorKids = paintEl.getElementsByTagName("Color");
+        for (int i = 0; i < colorKids.getLength(); i++) {
+            if (colorKids.item(i) instanceof Element ce) {
+                String h = parseRgbString(ce.getAttribute("Value"), null);
+                if (isNotBlank(h)) return h;
+            }
+        }
+        NodeList segments = paintEl.getElementsByTagNameNS("*", "Segment");
+        if (segments.getLength() == 0) segments = paintEl.getElementsByTagName("Segment");
+        for (int i = 0; i < segments.getLength(); i++) {
+            if (!(segments.item(i) instanceof Element seg)) continue;
+            NodeList cols = seg.getElementsByTagNameNS("*", "Color");
+            if (cols.getLength() == 0) cols = seg.getElementsByTagName("Color");
+            if (cols.getLength() > 0 && cols.item(0) instanceof Element ce) {
+                String h = parseRgbString(ce.getAttribute("Value"), null);
+                if (isNotBlank(h)) return h;
+            }
+        }
+        return null;
+    }
+
+    /** 文本对象上的填充色：优先 FillColor 子树，其次属性 {@code FillColor}，再次 DefaultAppearance。 */
+    private String extractTextFillColorHexFromElement(Element el) {
+        if (el == null) return null;
+        NodeList fillNodes = el.getElementsByTagNameNS("*", "FillColor");
+        if (fillNodes.getLength() == 0) fillNodes = el.getElementsByTagName("FillColor");
+        if (fillNodes.getLength() > 0 && fillNodes.item(0) instanceof Element fillEl) {
+            String h = paintColorHexFromElement(fillEl);
+            if (isNotBlank(h)) return h;
+        }
+        String fillAttr = el.getAttribute("FillColor");
+        if (isNotBlank(fillAttr)) {
+            String p = parseRgbString(fillAttr, null);
+            if (isNotBlank(p)) return p;
+        }
+        NodeList daNodes = el.getElementsByTagNameNS("*", "DefaultAppearance");
+        if (daNodes.getLength() == 0) daNodes = el.getElementsByTagName("DefaultAppearance");
+        if (daNodes.getLength() > 0 && daNodes.item(0) instanceof Element daEl) {
+            NodeList daFill = daEl.getElementsByTagNameNS("*", "FillColor");
+            if (daFill.getLength() == 0) daFill = daEl.getElementsByTagName("FillColor");
+            if (daFill.getLength() > 0 && daFill.item(0) instanceof Element daFillEl) {
+                String h = paintColorHexFromElement(daFillEl);
+                if (isNotBlank(h)) return h;
             }
         }
         return null;
@@ -923,7 +1083,7 @@ public class OfdParseService {
         switch (localName) {
             case "TextObject", "CT_Text" -> {
                 dto.setType("TEXT");
-                parseTextFromDom(el, dto);
+                parseTextFromDom(el, dto, ctx);
                 if (ctm != null) dto.setRotation(extractRotationFromMatrix(ctm));
                 if (dto.getWidth() <= 0) dto.setWidth(80.0);
                 if (dto.getHeight() <= 0) dto.setHeight(18.0);
@@ -957,7 +1117,7 @@ public class OfdParseService {
         elements.add(dto);
     }
 
-    private void parseTextFromDom(Element el, ElementDTO dto) {
+    private void parseTextFromDom(Element el, ElementDTO dto, ParseContext ctx) {
         // 字号
         String sizeAttr = el.getAttribute("Size");
         double fontSize = 12.0;
@@ -977,41 +1137,15 @@ public class OfdParseService {
         }
         dto.setContent(sb.toString());
 
-        // 颜色：从 FillColor 属性或子节点取
-        String color = "#000000";
-        NodeList fillNodes = el.getElementsByTagNameNS("*", "FillColor");
-        if (fillNodes.getLength() == 0) fillNodes = el.getElementsByTagName("FillColor");
-        if (fillNodes.getLength() > 0 && fillNodes.item(0) instanceof Element fillEl) {
-            String val = fillEl.getAttribute("Value");
-            String parsed = parseRgbString(val, null);
-            if (parsed != null) color = parsed;
-        }
-
-// 路径2：TextObject 自身属性（某些OFD实现直接放属性）
-        if ("#000000".equals(color)) {
-            String fillAttr = el.getAttribute("FillColor");
-            if (isNotBlank(fillAttr)) {
-                String parsed = parseRgbString(fillAttr, null);
-                if (parsed != null) color = parsed;
-            }
-        }
-
-// 路径3：查找 DefaultAppearance/FillColor
-        if ("#000000".equals(color)) {
-            NodeList daNodes = el.getElementsByTagNameNS("*", "DefaultAppearance");
-            if (daNodes.getLength() == 0) daNodes = el.getElementsByTagName("DefaultAppearance");
-            if (daNodes.getLength() > 0 && daNodes.item(0) instanceof Element daEl) {
-                NodeList daFill = daEl.getElementsByTagNameNS("*", "FillColor");
-                if (daFill.getLength() == 0) daFill = daEl.getElementsByTagName("FillColor");
-                if (daFill.getLength() > 0 && daFill.item(0) instanceof Element daFillEl) {
-                    String val = daFillEl.getAttribute("Value");
-                    String parsed = parseRgbString(val, null);
-                    if (parsed != null) color = parsed;
-                }
-            }
-        }
+        String color = extractTextFillColorHexFromElement(el);
+        if (!isNotBlank(color)) color = "#000000";
         dto.setColor(color);
-        log.debug("【TEXT颜色】color={}, element={}", color, el.getAttribute("Boundary"));
+        String oidDom = dto.getXmlObjId();
+        if (ctx != null && isNotBlank(oidDom)) {
+            String keyed = ctx.textFillHexByObjectIdPage.get(oidDom.trim());
+            if (isNotBlank(keyed)) dto.setColor(keyed);
+        }
+        log.debug("【TEXT颜色】color={}, element={}", dto.getColor(), el.getAttribute("Boundary"));
         // 字体
         String fontFamily = "宋体";
         NodeList fontNodes = el.getElementsByTagNameNS("*", "Font");
@@ -1060,6 +1194,8 @@ public class OfdParseService {
     }
 
     private void parsePathFromDom(Element el, ElementDTO dto) {
+        applyOfdPathStrokeFillFromAttributes(el, dto);
+
         NodeList abbrevNodes = el.getElementsByTagNameNS("*", "AbbreviatedData");
         if (abbrevNodes.getLength() == 0)
             abbrevNodes = el.getElementsByTagName("AbbreviatedData");
@@ -1067,47 +1203,124 @@ public class OfdParseService {
         if (abbrevNodes.getLength() > 0) {
             String rawPath = abbrevNodes.item(0).getTextContent();
             if (isNotBlank(rawPath)) {
-                String svgPath = convertOfdPathToSvg(rawPath.trim(), dto.getX(), dto.getY());
+                // 页坐标 = CTM * 局部 + Boundary 左上（不能用已变换后的 AABB 作仅平移）
+                String bnd = el.getAttribute("Boundary");
+                List<Double> raw = extractNumbers(bnd);
+                double rbx = raw.size() >= 1 ? raw.get(0) : 0.0;
+                double rby = raw.size() >= 2 ? raw.get(1) : 0.0;
+                Matrix pathCtm = parseCTMString(firstNonBlank(
+                        el.getAttribute("CTM"), el.getAttribute("ctm")));
+                String svgPath = convertOfdPathToSvg(rawPath.trim(), rbx, rby, pathCtm);
                 dto.setPathData(svgPath);
-                log.debug("【PATH-DOM】raw={}, svg={}, boundary=({},{},{},{})",
-                        rawPath.trim(), svgPath,
-                        dto.getX(), dto.getY(), dto.getWidth(), dto.getHeight());
+                log.debug("【PATH-DOM】svg={}, rawBoundary=({},{}), ctm={}",
+                        svgPath, rbx, rby, pathCtm);
             }
         }
 
         // 填充色
-        NodeList fillNodes = el.getElementsByTagNameNS("*", "FillColor");
-        if (fillNodes.getLength() == 0) fillNodes = el.getElementsByTagName("FillColor");
-        if (fillNodes.getLength() > 0 && fillNodes.item(0) instanceof Element fillEl) {
-            dto.setFillColor(parseRgbString(fillEl.getAttribute("Value"), null));
+        if (!Boolean.FALSE.equals(dto.getPathFillEnabled())) {
+            NodeList fillNodes = el.getElementsByTagNameNS("*", "FillColor");
+            if (fillNodes.getLength() == 0) fillNodes = el.getElementsByTagName("FillColor");
+            if (fillNodes.getLength() > 0 && fillNodes.item(0) instanceof Element fillEl) {
+                dto.setFillColor(parseRgbString(fillEl.getAttribute("Value"), null));
+            }
         }
 
         // 描边色
-        NodeList strokeNodes = el.getElementsByTagNameNS("*", "StrokeColor");
-        if (strokeNodes.getLength() == 0) strokeNodes = el.getElementsByTagName("StrokeColor");
-        if (strokeNodes.getLength() > 0 && strokeNodes.item(0) instanceof Element strokeEl) {
-            dto.setStrokeColor(parseRgbString(strokeEl.getAttribute("Value"), "#222222"));
+        if (!Boolean.FALSE.equals(dto.getPathStrokeEnabled())) {
+            NodeList strokeNodes = el.getElementsByTagNameNS("*", "StrokeColor");
+            if (strokeNodes.getLength() == 0) strokeNodes = el.getElementsByTagName("StrokeColor");
+            if (strokeNodes.getLength() > 0 && strokeNodes.item(0) instanceof Element strokeEl) {
+                dto.setStrokeColor(parseRgbString(strokeEl.getAttribute("Value"), null));
+            }
         }
 
         // 线宽
-        String lineWidthAttr = el.getAttribute("LineWidth");
-        if (isNotBlank(lineWidthAttr)) {
-            Double lw = tryParseDouble(lineWidthAttr);
-            if (lw != null && lw > 0) dto.setLineWidth(lw);
+        if (!Boolean.FALSE.equals(dto.getPathStrokeEnabled())) {
+            String lineWidthAttr = el.getAttribute("LineWidth");
+            if (isNotBlank(lineWidthAttr)) {
+                Double lw = tryParseDouble(lineWidthAttr);
+                if (lw != null && lw > 0) dto.setLineWidth(lw);
+            }
         }
 
-        if (!isNotBlank(dto.getFillColor()) && !isNotBlank(dto.getStrokeColor())) {
+        if (Boolean.FALSE.equals(dto.getPathFillEnabled())) {
+            dto.setFillColor(null);
+        }
+        if (Boolean.TRUE.equals(dto.getPathFillEnabled()) && !isNotBlank(dto.getFillColor())) {
+            dto.setFillColor("#000000");
+        }
+        if (Boolean.TRUE.equals(dto.getPathStrokeEnabled()) && (dto.getLineWidth() == null || dto.getLineWidth() <= 0)) {
+            dto.setLineWidth(0.3);
+        }
+        if (Boolean.TRUE.equals(dto.getPathStrokeEnabled()) && !isNotBlank(dto.getStrokeColor())) {
             dto.setStrokeColor("#222222");
+        }
+        if (isNotBlank(dto.getPathData()) && !isNotBlank(dto.getFillColor()) && !isNotBlank(dto.getStrokeColor())
+                && !Boolean.FALSE.equals(dto.getPathStrokeEnabled())) {
+            dto.setStrokeColor("#222222");
+            if (dto.getLineWidth() == null || dto.getLineWidth() <= 0) {
+                dto.setLineWidth(0.3);
+            }
+        }
+        // 描边类矢量字（无 TextObject 时以 Path 画字）：有描边色但未给线宽
+        if (isNotBlank(dto.getPathData()) && isNotBlank(dto.getStrokeColor()) && !Boolean.FALSE.equals(dto.getPathStrokeEnabled())
+                && (dto.getLineWidth() == null || dto.getLineWidth() <= 0)) {
+            dto.setLineWidth(0.25);
         }
         if (!isNotBlank(dto.getPathData())) {
             dto.setContent("[图形]");
         }
     }
+
     /**
-     * OFD AbbreviatedData格式转SVG path格式
-     * OFD路径坐标是相对于Boundary左上角的局部坐标，需要加offsetX/offsetY变成页面绝对坐标
+     * OFD PathObject/Path 的 {@code Fill}{@code Stroke} 布尔与矢量渲染语义
+     * （纯填充的整页色块为 Stroke=false，前端不得再画默认描边）
      */
-    private String convertOfdPathToSvg(String ofdPath, double offsetX, double offsetY) {
+    private void applyOfdPathStrokeFillFromAttributes(Element el, ElementDTO dto) {
+        String f = firstNonBlank(el.getAttribute("Fill"), el.getAttribute("fill"));
+        if (isNotBlank(f)) {
+            if ("false".equalsIgnoreCase(f.trim())) {
+                dto.setPathFillEnabled(false);
+            } else if ("true".equalsIgnoreCase(f.trim())) {
+                dto.setPathFillEnabled(true);
+            }
+        }
+        String s = firstNonBlank(el.getAttribute("Stroke"), el.getAttribute("stroke"));
+        if (isNotBlank(s)) {
+            if ("false".equalsIgnoreCase(s.trim())) {
+                dto.setPathStrokeEnabled(false);
+                dto.setLineWidth(0.0);
+                dto.setStrokeColor(null);
+            } else if ("true".equalsIgnoreCase(s.trim())) {
+                dto.setPathStrokeEnabled(true);
+            }
+        }
+    }
+    /**
+     * OFD AbbreviatedData 转 SVG path。局部坐标经 {@code ctm} 变到与 Boundary 同一父系，再加上 Boundary 左上得到页坐标。
+     */
+    private Point toPagePoint(Matrix ctm, double boundaryX, double boundaryY, double lx, double ly) {
+        Point p;
+        if (ctm == null) {
+            p = new Point();
+            p.x = lx + boundaryX;
+            p.y = ly + boundaryY;
+        } else {
+            p = apply(ctm, lx, ly);
+            p.x += boundaryX;
+            p.y += boundaryY;
+        }
+        return p;
+    }
+
+    private double effectiveArcRadius(Matrix ctm, double rx, double ry) {
+        if (ctm == null) return (Math.abs(rx) + Math.abs(ry)) * 0.5;
+        double s = (Math.hypot(ctm.a, ctm.b) + Math.hypot(ctm.c, ctm.d)) * 0.5;
+        return (Math.abs(rx) + Math.abs(ry)) * 0.5 * s;
+    }
+
+    private String convertOfdPathToSvg(String ofdPath, double boundaryX, double boundaryY, Matrix ctm) {
         if (!isNotBlank(ofdPath)) return ofdPath;
         StringBuilder svg = new StringBuilder();
         String[] tokens = ofdPath.trim().split("\\s+");
@@ -1117,58 +1330,54 @@ public class OfdParseService {
             switch (cmd) {
                 case "S", "M" -> {
                     if (i + 2 < tokens.length) {
-                        double x = parseCoord(tokens[i + 1]) + offsetX;
-                        double y = parseCoord(tokens[i + 2]) + offsetY;
-                        svg.append(String.format(Locale.ROOT, "M %.4f,%.4f ", x, y));
+                        double lx = parseCoord(tokens[i + 1]);
+                        double ly = parseCoord(tokens[i + 2]);
+                        Point t = toPagePoint(ctm, boundaryX, boundaryY, lx, ly);
+                        svg.append(String.format(Locale.ROOT, "M %.4f,%.4f ", t.x, t.y));
                         i += 3;
                     } else { i++; }
                 }
                 case "L" -> {
                     if (i + 2 < tokens.length) {
-                        double x = parseCoord(tokens[i + 1]) + offsetX;
-                        double y = parseCoord(tokens[i + 2]) + offsetY;
-                        svg.append(String.format(Locale.ROOT, "L %.4f,%.4f ", x, y));
+                        double lx = parseCoord(tokens[i + 1]);
+                        double ly = parseCoord(tokens[i + 2]);
+                        Point t = toPagePoint(ctm, boundaryX, boundaryY, lx, ly);
+                        svg.append(String.format(Locale.ROOT, "L %.4f,%.4f ", t.x, t.y));
                         i += 3;
                     } else { i++; }
                 }
                 case "B" -> {
-                    // 三次贝塞尔：B x1 y1 x2 y2 x y → C
                     if (i + 6 < tokens.length) {
-                        double x1 = parseCoord(tokens[i + 1]) + offsetX;
-                        double y1 = parseCoord(tokens[i + 2]) + offsetY;
-                        double x2 = parseCoord(tokens[i + 3]) + offsetX;
-                        double y2 = parseCoord(tokens[i + 4]) + offsetY;
-                        double x  = parseCoord(tokens[i + 5]) + offsetX;
-                        double y  = parseCoord(tokens[i + 6]) + offsetY;
+                        Point p1 = toPagePoint(ctm, boundaryX, boundaryY, parseCoord(tokens[i + 1]), parseCoord(tokens[i + 2]));
+                        Point p2 = toPagePoint(ctm, boundaryX, boundaryY, parseCoord(tokens[i + 3]), parseCoord(tokens[i + 4]));
+                        Point p3 = toPagePoint(ctm, boundaryX, boundaryY, parseCoord(tokens[i + 5]), parseCoord(tokens[i + 6]));
                         svg.append(String.format(Locale.ROOT,
-                                "C %.4f,%.4f %.4f,%.4f %.4f,%.4f ", x1, y1, x2, y2, x, y));
+                                "C %.4f,%.4f %.4f,%.4f %.4f,%.4f ", p1.x, p1.y, p2.x, p2.y, p3.x, p3.y));
                         i += 7;
                     } else { i++; }
                 }
                 case "Q" -> {
                     if (i + 4 < tokens.length) {
-                        double x1 = parseCoord(tokens[i + 1]) + offsetX;
-                        double y1 = parseCoord(tokens[i + 2]) + offsetY;
-                        double x  = parseCoord(tokens[i + 3]) + offsetX;
-                        double y  = parseCoord(tokens[i + 4]) + offsetY;
+                        Point p1 = toPagePoint(ctm, boundaryX, boundaryY, parseCoord(tokens[i + 1]), parseCoord(tokens[i + 2]));
+                        Point p2 = toPagePoint(ctm, boundaryX, boundaryY, parseCoord(tokens[i + 3]), parseCoord(tokens[i + 4]));
                         svg.append(String.format(Locale.ROOT,
-                                "Q %.4f,%.4f %.4f,%.4f ", x1, y1, x, y));
+                                "Q %.4f,%.4f %.4f,%.4f ", p1.x, p1.y, p2.x, p2.y));
                         i += 5;
                     } else { i++; }
                 }
                 case "A" -> {
-                    // A rx ry angle large-arc sweep x y
                     if (i + 7 < tokens.length) {
-                        double rx    = parseCoord(tokens[i + 1]);
-                        double ry    = parseCoord(tokens[i + 2]);
+                        double rx0 = parseCoord(tokens[i + 1]);
+                        double ry0 = parseCoord(tokens[i + 2]);
                         double angle = parseCoord(tokens[i + 3]);
                         String large = tokens[i + 4];
                         String sweep = tokens[i + 5];
-                        double x     = parseCoord(tokens[i + 6]) + offsetX;
-                        double y     = parseCoord(tokens[i + 7]) + offsetY;
+                        Point t = toPagePoint(ctm, boundaryX, boundaryY, parseCoord(tokens[i + 6]), parseCoord(tokens[i + 7]));
+                        double r = effectiveArcRadius(ctm, rx0, ry0);
+                        if (r < 1e-5) r = 0.01;
                         svg.append(String.format(Locale.ROOT,
                                 "A %.4f,%.4f %.4f %s %s %.4f,%.4f ",
-                                rx, ry, angle, large, sweep, x, y));
+                                r, r, angle, large, sweep, t.x, t.y));
                         i += 8;
                     } else { i++; }
                 }
@@ -1246,7 +1455,7 @@ public class OfdParseService {
 
         if (className.contains("Text")) {
             dto.setType("TEXT");
-            parseTextContent(block, dto, ctm, finalRect);
+            parseTextContent(block, dto, ctm, finalRect, ctx);
             if (dto.getWidth() == null || dto.getWidth() <= 0) dto.setWidth(80.0);
             if (dto.getHeight() == null || dto.getHeight() <= 0) dto.setHeight(18.0);
 
@@ -1260,7 +1469,9 @@ public class OfdParseService {
 
         } else if (className.contains("Path")) {
             dto.setType("PATH");
-            parsePathContent(block, dto);
+            double rbx = (boundary != null && boundary.x != null) ? boundary.x : 0.0;
+            double rby = (boundary != null && boundary.y != null) ? boundary.y : 0.0;
+            parsePathContent(block, dto, ctm, rbx, rby);
             if (dto.getWidth() == null || dto.getWidth() <= 0) dto.setWidth(100.0);
             if (dto.getHeight() == null || dto.getHeight() <= 0) dto.setHeight(100.0);
 
@@ -1347,7 +1558,7 @@ public class OfdParseService {
         return r;
     }
 
-    private void parseTextContent(Object textObj, ElementDTO dto, Matrix ctm, Rect finalRect) {
+    private void parseTextContent(Object textObj, ElementDTO dto, Matrix ctm, Rect finalRect, ParseContext ctx) {
         try {
             Double rawSize = invokeDoubleAny(textObj, "getSize", "getFontSize");
             if (rawSize == null || rawSize <= 0) rawSize = 12.0;
@@ -1378,6 +1589,11 @@ public class OfdParseService {
             }
             dto.setContent(sb.toString());
             dto.setColor(parseColorFromObject(textObj, "#000000"));
+            String oid = dto.getXmlObjId();
+            if (ctx != null && isNotBlank(oid)) {
+                String fromPageXml = ctx.textFillHexByObjectIdPage.get(oid.trim());
+                if (isNotBlank(fromPageXml)) dto.setColor(fromPageXml);
+            }
             parseFontInfo(textObj, dto);
 
         } catch (Exception e) {
@@ -1398,10 +1614,11 @@ public class OfdParseService {
                 Object gObj = invokeAny(fillColor, "getGreen", "getG", "getValueG");
                 Object bObj = invokeAny(fillColor, "getBlue", "getB", "getValueB");
                 if (rObj != null && gObj != null && bObj != null) {
-                    return String.format("#%02X%02X%02X",
-                            ((Number) rObj).intValue(),
-                            ((Number) gObj).intValue(),
-                            ((Number) bObj).intValue());
+                    double rf = ((Number) rObj).doubleValue();
+                    double gf = ((Number) gObj).doubleValue();
+                    double bf = ((Number) bObj).doubleValue();
+                    String hex = rgbTripletDoublesToHex(rf, gf, bf, null);
+                    if (isNotBlank(hex)) return hex;
                 }
                 String[] parts = String.valueOf(fillColor).trim().split("\\s+");
                 if (parts.length >= 3) {
@@ -1409,8 +1626,8 @@ public class OfdParseService {
                     Double g = tryParseDouble(parts[1]);
                     Double b = tryParseDouble(parts[2]);
                     if (r != null && g != null && b != null) {
-                        return String.format("#%02X%02X%02X",
-                                r.intValue(), g.intValue(), b.intValue());
+                        String hex = rgbTripletDoublesToHex(r, g, b, null);
+                        if (isNotBlank(hex)) return hex;
                     }
                 }
             }
@@ -1476,8 +1693,9 @@ public class OfdParseService {
         }
     }
 
-    private void parsePathContent(Object pathObj, ElementDTO dto) {
+    private void parsePathContent(Object pathObj, ElementDTO dto, Matrix ctm, double rawBoundX, double rawBoundY) {
         try {
+            applyPathStrokeFillFromOfdrwObject(pathObj, dto);
             String rawPath = firstNonBlank(
                     invokeStringAny(pathObj, "getAbbreviatedData"),
                     invokeStringAny(pathObj, "getPathData"),
@@ -1485,28 +1703,61 @@ public class OfdParseService {
                     invokeStringAny(pathObj, "toPathString")
             );
             if (isNotBlank(rawPath)) {
-                double ox = dto.getX() == null ? 0.0 : dto.getX();
-                double oy = dto.getY() == null ? 0.0 : dto.getY();
-                dto.setPathData(convertOfdPathToSvg(rawPath.trim(), ox, oy));
+                dto.setPathData(convertOfdPathToSvg(rawPath.trim(), rawBoundX, rawBoundY, ctm));
             } else {
                 dto.setContent("[图形]");
             }
 
-            dto.setFillColor(parseColorFromObject(pathObj, null));
+            if (!Boolean.FALSE.equals(dto.getPathFillEnabled())) {
+                dto.setFillColor(parseColorFromObject(pathObj, null));
+            } else {
+                dto.setFillColor(null);
+            }
             try {
-                Object sc = invokeAny(pathObj, "getStrokeColor", "getStroke");
-                if (sc != null) dto.setStrokeColor(parseColorFromObject(sc, null));
+                if (!Boolean.FALSE.equals(dto.getPathStrokeEnabled())) {
+                    Object sc = invokeAny(pathObj, "getStrokeColor", "getStroke");
+                    if (sc != null) dto.setStrokeColor(parseColorFromObject(sc, null));
+                }
             } catch (Exception ignore) {}
 
-            Double lineWidth = invokeDoubleAny(pathObj, "getLineWidth", "getStrokeWidth");
-            if (lineWidth != null && lineWidth > 0) dto.setLineWidth(lineWidth);
-
-            if (!isNotBlank(dto.getFillColor()) && !isNotBlank(dto.getStrokeColor())) {
+            if (!Boolean.FALSE.equals(dto.getPathStrokeEnabled())) {
+                Double lineWidth = invokeDoubleAny(pathObj, "getLineWidth", "getStrokeWidth");
+                if (lineWidth != null && lineWidth > 0) dto.setLineWidth(lineWidth);
+            }
+            if (isNotBlank(dto.getPathData()) && !isNotBlank(dto.getFillColor()) && !isNotBlank(dto.getStrokeColor())
+                    && !Boolean.FALSE.equals(dto.getPathStrokeEnabled())) {
                 dto.setStrokeColor("#222222");
+                if (dto.getLineWidth() == null || dto.getLineWidth() <= 0) {
+                    dto.setLineWidth(0.3);
+                }
             }
         } catch (Exception e) {
             dto.setContent("[图形]");
         }
+    }
+
+    private void applyPathStrokeFillFromOfdrwObject(Object o, ElementDTO dto) {
+        if (o == null) return;
+        try {
+            Object st = invokeAny(o, "isStroke", "isStroked");
+            if (st instanceof Boolean && !((Boolean) st)) {
+                dto.setPathStrokeEnabled(false);
+                dto.setLineWidth(0.0);
+                dto.setStrokeColor(null);
+            } else if (st instanceof String && "false".equalsIgnoreCase(((String) st).trim())) {
+                dto.setPathStrokeEnabled(false);
+                dto.setLineWidth(0.0);
+                dto.setStrokeColor(null);
+            }
+        } catch (Exception ignore) {}
+        try {
+            Object f = invokeAny(o, "isFill", "isFilled", "getFill");
+            if (f instanceof Boolean && !((Boolean) f)) {
+                dto.setPathFillEnabled(false);
+            } else if (f instanceof String && "false".equalsIgnoreCase(((String) f).trim())) {
+                dto.setPathFillEnabled(false);
+            }
+        } catch (Exception ignore) {}
     }
 
     // ==================== 资源索引 ====================
@@ -1892,14 +2143,42 @@ public class OfdParseService {
         if (!isNotBlank(val)) return defaultColor;
         String[] parts = val.trim().split("\\s+");
         if (parts.length >= 3) {
+            Double r = tryParseDouble(parts[0]);
+            Double g = tryParseDouble(parts[1]);
+            Double b = tryParseDouble(parts[2]);
+            if (r != null && g != null && b != null) {
+                String hex = rgbTripletDoublesToHex(r, g, b, null);
+                if (isNotBlank(hex)) return hex;
+            }
             try {
-                return String.format("#%02X%02X%02X",
-                        Integer.parseInt(parts[0]),
-                        Integer.parseInt(parts[1]),
-                        Integer.parseInt(parts[2]));
+                return String.format(Locale.ROOT, "#%02X%02X%02X",
+                        clamp255(Integer.parseInt(parts[0])),
+                        clamp255(Integer.parseInt(parts[1])),
+                        clamp255(Integer.parseInt(parts[2])));
             } catch (Exception ignore) {}
         }
         return defaultColor;
+    }
+
+    /** OFD 常见 0–1 浮点 RGB；误当 0–255 会变成近黑。 */
+    private static String rgbTripletDoublesToHex(double rf, double gf, double bf, String fallback) {
+        if (!Double.isFinite(rf) || !Double.isFinite(gf) || !Double.isFinite(bf)) return fallback;
+        double max = Math.max(rf, Math.max(gf, bf));
+        int r, g, b;
+        if (max <= 1.0001) {
+            r = clamp255((int) Math.round(rf * 255.0));
+            g = clamp255((int) Math.round(gf * 255.0));
+            b = clamp255((int) Math.round(bf * 255.0));
+        } else {
+            r = clamp255((int) Math.round(rf));
+            g = clamp255((int) Math.round(gf));
+            b = clamp255((int) Math.round(bf));
+        }
+        return String.format(Locale.ROOT, "#%02X%02X%02X", r, g, b);
+    }
+
+    private static int clamp255(int v) {
+        return Math.max(0, Math.min(255, v));
     }
 
     private List<Double> extractNumbers(String s) {
@@ -2069,6 +2348,8 @@ public class OfdParseService {
         final Map<String, String> resourceDataUrlById = new ConcurrentHashMap<>();
         final Map<String, String> resourcePathById    = new ConcurrentHashMap<>();
         final Set<String> annotResourceIds = new HashSet<>();
+        /** 当前页 Content.xml：TextObject 的 XML ID → #RRGGBB */
+        final Map<String, String> textFillHexByObjectIdPage = new LinkedHashMap<>();
         ZipFile zipFile;
     }
 
