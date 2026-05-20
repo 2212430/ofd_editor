@@ -33,6 +33,11 @@ public class ElementDTO {
     private Boolean bold;
     // 是否斜体（新增）
     private Boolean italic;
+    /**
+     * 是否为竖排文本：来源于 TextCode 的 {@code DeltaY}（且 {@code DeltaX} 为空/全 0）。
+     * 前端按此走多行渲染：每个字符独立成行、字号取 {@code Size} 而非外接框高度。
+     */
+    private Boolean verticalLayout;
 
     // ========== 变换相关 ==========
     // 旋转角度

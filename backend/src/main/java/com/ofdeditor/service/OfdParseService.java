@@ -1048,17 +1048,19 @@ public class OfdParseService {
 
         double x = nums.get(0), y = nums.get(1), w = nums.get(2), h = nums.get(3);
 
-        // CTM变换
+        // 解析 CTM（但是否参与 Boundary 变换取决于元素类型）
+        // OFD 规范：Boundary 已经是父坐标系下的 AABB；CTM 描述的是对象局部空间到父坐标系的变换，
+        // 用于内部内容（Path 的 AbbreviatedData / Text 的 TextCode 坐标与字号 / Image 的单位方框）。
+        // 因此对 ImageObject、TextObject 不应再把 CTM 套用到 Boundary，否则会把图片/文本放大并移位。
+        // PathObject 的 AABB 只用于选择框，对渲染影响小，保留旧逻辑以最大限度避免回归。
         String ctmStr = el.getAttribute("CTM");
-        Matrix ctm = null;
-        if (isNotBlank(ctmStr)) {
-            ctm = parseCTMString(ctmStr);
-            if (ctm != null) {
-                Rect transformed = transformRect(Rect.of(x, y, w, h), ctm);
-                if (transformed != null) {
-                    x = transformed.x; y = transformed.y;
-                    w = transformed.w; h = transformed.h;
-                }
+        Matrix ctm = parseCTMString(ctmStr);
+        boolean applyCtmToBoundary = "PathObject".equals(localName) || "CT_Path".equals(localName);
+        if (ctm != null && applyCtmToBoundary) {
+            Rect transformed = transformRect(Rect.of(x, y, w, h), ctm);
+            if (transformed != null) {
+                x = transformed.x; y = transformed.y;
+                w = transformed.w; h = transformed.h;
             }
         }
 
@@ -1118,24 +1120,52 @@ public class OfdParseService {
     }
 
     private void parseTextFromDom(Element el, ElementDTO dto, ParseContext ctx) {
-        // 字号
+        // 字号：Size 是局部空间字号，OFD 常见做法是 Size=1 + CTM 缩放编码实际字号，因此乘以 CTM 的 Y 向缩放
         String sizeAttr = el.getAttribute("Size");
         double fontSize = 12.0;
         if (isNotBlank(sizeAttr)) {
             Double s = tryParseDouble(sizeAttr);
             if (s != null && s > 0) fontSize = s;
         }
-        dto.setFontSize(fontSize);
+        Matrix ctmForSize = parseCTMString(firstNonBlank(el.getAttribute("CTM"), el.getAttribute("ctm")));
+        if (ctmForSize != null) {
+            double scaleY = Math.sqrt(ctmForSize.b * ctmForSize.b + ctmForSize.d * ctmForSize.d);
+            if (Double.isFinite(scaleY) && scaleY > 0.0001) fontSize *= scaleY;
+        }
 
-        // 文本内容
+        // 文本内容 + 竖排判定：基于 TextCode 的 DeltaY/DeltaX
+        // 发票里 "购买方" 通常是单 TextObject + DeltaY="6 6"（每字向下推进 6mm）+ DeltaX 缺失/全 0。
+        // 老逻辑只是 append 文本，于是把竖排压成 "购买方" 一行，再用窄高外接框反推超大字号。
         StringBuilder sb = new StringBuilder();
         NodeList tcNodes = el.getElementsByTagNameNS("*", "TextCode");
         if (tcNodes.getLength() == 0) tcNodes = el.getElementsByTagName("TextCode");
+        boolean verticalLayout = false;
         for (int i = 0; i < tcNodes.getLength(); i++) {
-            String text = tcNodes.item(i).getTextContent();
-            if (isNotBlank(text)) sb.append(text);
+            Node n = tcNodes.item(i);
+            if (!(n instanceof Element tc)) continue;
+            String text = tc.getTextContent();
+            if (!isNotBlank(text)) continue;
+
+            List<Double> dy = extractNumbers(tc.getAttribute("DeltaY"));
+            List<Double> dx = extractNumbers(tc.getAttribute("DeltaX"));
+            boolean hasDy = dy.stream().anyMatch(v -> Math.abs(v) > 0.01);
+            boolean hasDx = dx.stream().anyMatch(v -> Math.abs(v) > 0.01);
+            String trimmed = text;
+            // 仅 DeltaY 有效（DeltaX 缺失/全 0）→ 当前 TextCode 是一段竖排
+            if (hasDy && !hasDx && trimmed.length() > 1) {
+                verticalLayout = true;
+                if (sb.length() > 0 && sb.charAt(sb.length() - 1) != '\n') sb.append('\n');
+                for (int k = 0; k < trimmed.length(); k++) {
+                    if (k > 0) sb.append('\n');
+                    sb.append(trimmed.charAt(k));
+                }
+            } else {
+                sb.append(trimmed);
+            }
         }
         dto.setContent(sb.toString());
+        dto.setVerticalLayout(verticalLayout ? Boolean.TRUE : null);
+        dto.setFontSize(fontSize);
 
         String color = extractTextFillColorHexFromElement(el);
         if (!isNotBlank(color)) color = "#000000";
@@ -1422,9 +1452,13 @@ public class OfdParseService {
         Rect boundary = getBoundaryRect(block);
         Matrix ctm = getCTM(block);
 
+        // OFD 规范：Boundary 已是父坐标系下的 AABB；CTM 描述局部空间到父坐标系的变换，
+        // 不该再套用到 Boundary 上。仅 PathObject 因 AABB 不直接参与渲染而保留旧行为，
+        // 避免极端 CTM（缩放/旋转）令选择框完全错位。
+        boolean applyCtmToBoundary = className.contains("Path");
         Rect finalRect;
         if (boundary != null) {
-            finalRect = (ctm != null) ? transformRect(boundary, ctm) : boundary;
+            finalRect = (ctm != null && applyCtmToBoundary) ? transformRect(boundary, ctm) : boundary;
         } else if (ctm != null) {
             finalRect = getFallbackRectFromCTMAndObject(ctm, block);
         } else {
@@ -1569,25 +1603,52 @@ public class OfdParseService {
                 if (!Double.isFinite(scaleY) || scaleY <= 0) scaleY = 1.0;
             }
             double corrected = rawSize * scaleY;
-            if (finalRect != null && finalRect.h != null && finalRect.h > 0.1) {
-                double hBased = finalRect.h * 0.78;
-                corrected = clamp(corrected, hBased * 0.6, hBased * 1.4);
-            }
-            dto.setFontSize(corrected);
 
+            // 文本内容 + 竖排判定（ofdrw 反射读取 TextCode 的 DeltaX / DeltaY）
             StringBuilder sb = new StringBuilder();
+            boolean verticalLayout = false;
             Object textCodes = invokeAny(textObj, "getTextCode", "getTextCodes");
             if (textCodes instanceof List<?>) {
                 for (Object tc : (List<?>) textCodes) {
                     Object content = invokeAny(tc, "getContent", "getText", "getValue");
-                    if (content != null) sb.append(content);
+                    if (content == null) continue;
+                    String text = String.valueOf(content);
+                    if (!isNotBlank(text)) continue;
+
+                    List<Double> dy = extractNumbers(invokeStringAny(tc, "getDeltaY"));
+                    List<Double> dx = extractNumbers(invokeStringAny(tc, "getDeltaX"));
+                    boolean hasDy = dy.stream().anyMatch(v -> Math.abs(v) > 0.01);
+                    boolean hasDx = dx.stream().anyMatch(v -> Math.abs(v) > 0.01);
+                    if (hasDy && !hasDx && text.length() > 1) {
+                        verticalLayout = true;
+                        if (sb.length() > 0 && sb.charAt(sb.length() - 1) != '\n') sb.append('\n');
+                        for (int k = 0; k < text.length(); k++) {
+                            if (k > 0) sb.append('\n');
+                            sb.append(text.charAt(k));
+                        }
+                    } else {
+                        sb.append(text);
+                    }
                 }
             }
             if (sb.isEmpty()) {
                 Object content = invokeAny(textObj, "getContent", "getText");
                 if (content != null) sb.append(content);
             }
+
+            // 字号修正：仅在水平单行短文本时按外接框高度回拽到可读区间；
+            // 竖排或多行场景下用 Size×scale 即可，避免按整列高度把字号撑爆。
+            if (!verticalLayout
+                    && !sb.toString().contains("\n")
+                    && finalRect != null && finalRect.h != null && finalRect.h > 0.1
+                    && finalRect.w != null && finalRect.w > 0
+                    && finalRect.h < finalRect.w * 1.5) {
+                double hBased = finalRect.h * 0.78;
+                corrected = clamp(corrected, hBased * 0.6, hBased * 1.4);
+            }
+            dto.setFontSize(corrected);
             dto.setContent(sb.toString());
+            dto.setVerticalLayout(verticalLayout ? Boolean.TRUE : null);
             dto.setColor(parseColorFromObject(textObj, "#000000"));
             String oid = dto.getXmlObjId();
             if (ctx != null && isNotBlank(oid)) {

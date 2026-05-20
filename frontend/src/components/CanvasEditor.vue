@@ -906,12 +906,19 @@ function getTextConfig(element: ElementData) {
   const content    = element.content ?? ''
   const hasNl      = content.includes('\n')
   const fsMm       = element.fontSize ?? 3
+  const wMm        = element.width ?? 0
   const hMm        = element.height ?? 0
+  // 后端竖排：content 已按字符拆为多行；用列宽做字号上限，避免被外接框高度撑爆
+  const isVertical = element.verticalLayout === true || (hasNl && wMm > 0 && hMm > 0 && hMm > wMm * 1.5)
 
   let fsPx = fsMm * MM_TO_PX * store.scale
   const hPx = hMm > 0 ? hMm * MM_TO_PX * store.scale : 0
-  /** 单行条带：/ofdrw 字号偶发偏小，用外接框高度抬到可读下限；避免误判导致“微尘字” */
-  if (!hasNl && hPx > 2) {
+  const wPx = wMm > 0 ? wMm * MM_TO_PX * store.scale : 0
+  if (isVertical) {
+    // 竖排：字号上限取列宽（避免溢出到隔壁列）
+    if (wPx > 0) fsPx = Math.min(fsPx, wPx * 0.92)
+  } else if (!hasNl && hPx > 2 && (wPx <= 0 || hPx < wPx * 1.5)) {
+    /** 横向条带：ofdrw 字号偶发偏小，用外接框高度抬到可读下限；避免误判导致“微尘字” */
     fsPx = Math.min(hPx * 0.94, Math.max(fsPx, hPx * 0.56))
   }
 
@@ -919,7 +926,7 @@ function getTextConfig(element: ElementData) {
       .filter((x): x is string => typeof x === 'string' && x.length > 0)
       .join(', ')
 
-  return {
+  const baseCfg = {
     id:             element.id,
     x:              s(element.x),
     y:              s(element.y),
@@ -927,18 +934,19 @@ function getTextConfig(element: ElementData) {
     draggable:      !store.isAnnotationTool,
     text:           content,
     fontSize:       fsPx,
-    lineHeight:     hasNl ? 1.25 : 1.15,
+    lineHeight:     hasNl ? (isVertical ? 1.05 : 1.25) : 1.15,
     fontFamily:     fontStack,
     fontStyle:      `${element.bold ? 'bold' : 'normal'} ${element.italic ? 'italic' : ''}`.trim(),
-    align:          'left',
+    align:          isVertical ? 'center' : 'left',
     verticalAlign:  'top',
-    /** 永远不绑 width/height：Konva 在有限宽度内排版会裁出假「断字」，OFD 又多是窄盒单行 */
+    /** 横向 OFD 多窄盒单行，不绑 width 避免 Konva 假断字；竖排时绑列宽以居中每个字符 */
     wrap:           'none' as const,
     ellipsis:       false,
     fill:           element.color    ?? '#000000',
     stroke:         isSelected ? '#1a73e8' : undefined,
     strokeWidth:    isSelected ? 0.5 : 0,
   }
+  return isVertical && wPx > 0 ? { ...baseCfg, width: wPx } : baseCfg
 }
 
 function getPathConfig(element: ElementData) {

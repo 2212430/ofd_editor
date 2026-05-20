@@ -42,6 +42,8 @@ export interface ElementData {
     fontFamily?: string
     bold?: boolean
     italic?: boolean
+    /** 是否为竖排文本：true 时 content 内已用 \n 拆字，前端不按外接框高度放大字号 */
+    verticalLayout?: boolean
     rotation?: number
     scaleX?: number
     scaleY?: number
