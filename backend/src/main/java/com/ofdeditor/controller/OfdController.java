@@ -103,6 +103,10 @@ public class OfdController {
 
             byte[] ofdBytes = rebuildService.rebuildOfd(documentDTO, originalOfd);
 
+            if (documentDTO.getFileId() != null) {
+                cacheService.put(documentDTO.getFileId(), ofdBytes);
+            }
+
             String filename = URLEncoder.encode(
                     (documentDTO.getTitle() != null ? documentDTO.getTitle() : "edited") + ".ofd",
                     StandardCharsets.UTF_8

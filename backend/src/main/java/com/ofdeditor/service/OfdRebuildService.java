@@ -53,25 +53,268 @@ public class OfdRebuildService {
     // =========================================================
 
     private byte[] rebuildByPatchingXml(OfdDocumentDTO documentDTO, byte[] originalOfd) throws Exception {
-        // 1. 收集所有被修改的元素（isDirty=true）
         Map<String, ElementDTO> dirtyElements = collectDirtyElements(documentDTO);
         log.info("共 {} 个元素被修改", dirtyElements.size());
 
-        if (dirtyElements.isEmpty()) {
-            log.info("无修改元素，直接返回原始OFD");
+        Map<String, byte[]> zipEntries = unzipToMap(originalOfd);
+        List<String> originalPagePaths = findPageContentXmlPaths(zipEntries);
+
+        boolean structureChanged = needsStructuralRebuild(documentDTO, originalPagePaths);
+        if (structureChanged) {
+            log.info("检测到页面结构变更（重排/复制/增删），重建页面结构");
+            rebuildPageStructure(zipEntries, documentDTO, originalPagePaths);
+        }
+
+        if (dirtyElements.isEmpty() && !structureChanged) {
+            log.info("无修改，直接返回原始OFD");
             return originalOfd;
         }
 
-        // 2. 解压OFD到内存Map
-        Map<String, byte[]> zipEntries = unzipToMap(originalOfd);
+        if (!dirtyElements.isEmpty()) {
+            patchPageXmls(zipEntries, documentDTO, dirtyElements);
+        }
 
-        // 3. 找到所有页面XML并修改
-        patchPageXmls(zipEntries, documentDTO, dirtyElements);
-
-        // 4. 重新打包成OFD字节
         byte[] result = zipFromMap(zipEntries);
         log.info("精准修改完成，大小: {} bytes", result.length);
         return result;
+    }
+
+    /**
+     * 判断 DTO 页序/页数是否与原始 OFD 一致
+     */
+    private boolean needsStructuralRebuild(OfdDocumentDTO dto, List<String> originalPagePaths) {
+        if (dto.getPages() == null) return false;
+        int dtoCount = dto.getPages().size();
+        if (dtoCount != originalPagePaths.size()) return true;
+        for (int i = 0; i < dtoCount; i++) {
+            int src = resolveSourcePageIndex(dto.getPages().get(i), i);
+            if (src != i) return true;
+        }
+        return false;
+    }
+
+    private int resolveSourcePageIndex(PageDTO page, int defaultIndex) {
+        if (page == null) return defaultIndex;
+        if (page.getSourcePageIndex() != null) return page.getSourcePageIndex();
+        return defaultIndex;
+    }
+
+    /**
+     * 按 DTO 页序重建 Pages 目录并更新 Document.xml
+     */
+    private void rebuildPageStructure(Map<String, byte[]> zipEntries,
+                                      OfdDocumentDTO dto,
+                                      List<String> originalPagePaths) throws Exception {
+        String docPrefix = extractDocPrefix(originalPagePaths);
+        String docXmlPath = findDocumentXmlPath(zipEntries, docPrefix);
+
+        // 备份原始页面目录内容（即将从 zip 中删除）
+        Map<Integer, Map<String, byte[]>> originalPageDirs = snapshotPageDirectories(zipEntries, originalPagePaths);
+
+        // 删除旧 Pages 目录
+        String pagesPrefix = docPrefix + "/Pages/";
+        zipEntries.keySet().removeIf(k -> k.replace('\\', '/').startsWith(pagesPrefix));
+
+        List<PageDTO> pages = dto.getPages();
+        for (int i = 0; i < pages.size(); i++) {
+            PageDTO page = pages.get(i);
+            int srcIdx = resolveSourcePageIndex(page, i);
+            boolean isBlank = isBlankInsertedPage(page);
+
+            String destDir = docPrefix + "/Pages/Page_" + i + "/";
+            String destContent = destDir + "Content.xml";
+
+            if (isBlank) {
+                zipEntries.put(destContent, createBlankPageContentXml(page));
+            } else if (srcIdx >= 0 && srcIdx < originalPagePaths.size()) {
+                Map<String, byte[]> srcDir = originalPageDirs.get(srcIdx);
+                if (srcDir != null && !srcDir.isEmpty()) {
+                    for (Map.Entry<String, byte[]> e : srcDir.entrySet()) {
+                        zipEntries.put(destDir + e.getKey(), e.getValue());
+                    }
+                } else {
+                    byte[] content = findContentFromSnapshot(originalPageDirs, srcIdx);
+                    if (content != null) {
+                        zipEntries.put(destContent, content);
+                    } else {
+                        zipEntries.put(destContent, createBlankPageContentXml(page));
+                    }
+                }
+            } else {
+                log.warn("无效源页索引 {}，第 {} 页写入空白页", srcIdx, i + 1);
+                zipEntries.put(destContent, createBlankPageContentXml(page));
+            }
+            page.setPageIndex(i);
+        }
+
+        if (docXmlPath != null) {
+            updateDocumentXmlPages(zipEntries, docXmlPath, pages.size());
+        } else {
+            log.warn("未找到 Document.xml，页面列表可能未同步");
+        }
+    }
+
+    private boolean isBlankInsertedPage(PageDTO page) {
+        if (page.getSourcePageIndex() != null) return false;
+        return page.getElements() == null || page.getElements().isEmpty();
+    }
+
+    private Map<Integer, Map<String, byte[]>> snapshotPageDirectories(Map<String, byte[]> zipEntries,
+                                                                       List<String> contentPaths) {
+        Map<Integer, Map<String, byte[]>> result = new LinkedHashMap<>();
+        for (int i = 0; i < contentPaths.size(); i++) {
+            String contentPath = contentPaths.get(i).replace('\\', '/');
+            int slash = contentPath.lastIndexOf('/');
+            if (slash < 0) continue;
+            String dirPrefix = contentPath.substring(0, slash + 1);
+            Map<String, byte[]> dirFiles = new LinkedHashMap<>();
+            for (Map.Entry<String, byte[]> e : zipEntries.entrySet()) {
+                String key = e.getKey().replace('\\', '/');
+                if (key.startsWith(dirPrefix) && !key.endsWith("/")) {
+                    dirFiles.put(key.substring(dirPrefix.length()), e.getValue());
+                }
+            }
+            result.put(i, dirFiles);
+        }
+        return result;
+    }
+
+    private byte[] findContentFromSnapshot(Map<Integer, Map<String, byte[]>> snapshot, int srcIdx) {
+        Map<String, byte[]> dir = snapshot.get(srcIdx);
+        if (dir == null) return null;
+        return dir.get("Content.xml");
+    }
+
+    private String extractDocPrefix(List<String> pageContentPaths) {
+        if (pageContentPaths.isEmpty()) return "Doc_0";
+        String path = pageContentPaths.get(0).replace('\\', '/');
+        int idx = path.indexOf("/Pages/");
+        return idx > 0 ? path.substring(0, idx) : "Doc_0";
+    }
+
+    private String findDocumentXmlPath(Map<String, byte[]> zipEntries, String docPrefix) {
+        String prefix = docPrefix.replace('\\', '/');
+        String[] candidates = {prefix + "/Document.xml", prefix.toLowerCase() + "/Document.xml"};
+        for (String c : candidates) {
+            if (zipEntries.containsKey(c)) return c;
+        }
+        for (String key : zipEntries.keySet()) {
+            String k = key.replace('\\', '/');
+            if (k.endsWith("/Document.xml") && k.startsWith(prefix.split("/")[0])) {
+                return key;
+            }
+        }
+        for (String key : zipEntries.keySet()) {
+            if (key.replace('\\', '/').endsWith("/Document.xml")) return key;
+        }
+        return null;
+    }
+
+    private byte[] createBlankPageContentXml(PageDTO page) {
+        double w = page.getWidth() != null ? page.getWidth() : 210.0;
+        double h = page.getHeight() != null ? page.getHeight() : 297.0;
+        String xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                + "<ofd:Page xmlns:ofd=\"http://www.ofdspec.org/2016\">\n"
+                + "  <ofd:Area>\n"
+                + "    <ofd:PhysicalBox>0 0 "
+                + String.format(Locale.ROOT, "%.3f %.3f", w, h)
+                + "</ofd:PhysicalBox>\n"
+                + "  </ofd:Area>\n"
+                + "  <ofd:Content/>\n"
+                + "</ofd:Page>";
+        return xml.getBytes(StandardCharsets.UTF_8);
+    }
+
+    private void updateDocumentXmlPages(Map<String, byte[]> zipEntries,
+                                        String docXmlPath,
+                                        int pageCount) throws Exception {
+        byte[] bytes = zipEntries.get(docXmlPath);
+        Document doc = parseXml(bytes);
+        Element root = doc.getDocumentElement();
+
+        Element pagesContainer = findChildElementByLocalName(root, "Pages");
+        Element samplePage = null;
+
+        if (pagesContainer == null) {
+            samplePage = findFirstChildElementByLocalName(root, "Page");
+            String ns = root.getNamespaceURI();
+            pagesContainer = ns != null
+                    ? doc.createElementNS(ns, "Pages")
+                    : doc.createElement("Pages");
+            if (samplePage != null) {
+                root.insertBefore(pagesContainer, samplePage);
+            } else {
+                root.appendChild(pagesContainer);
+            }
+        } else {
+            samplePage = findFirstChildElementByLocalName(pagesContainer, "Page");
+        }
+
+        removeChildElementsByLocalName(pagesContainer, "Page");
+        removeChildElementsByLocalName(root, "Page");
+
+        String ns = pagesContainer.getNamespaceURI();
+        for (int i = 0; i < pageCount; i++) {
+            Element pageEl;
+            if (samplePage != null) {
+                pageEl = (Element) samplePage.cloneNode(false);
+            } else {
+                pageEl = ns != null ? doc.createElementNS(ns, "Page") : doc.createElement("Page");
+            }
+            setAttrIgnoreNs(pageEl, "ID", String.valueOf(i + 1));
+            setAttrIgnoreNs(pageEl, "BaseLoc", "Pages/Page_" + i + "/Content.xml");
+            pagesContainer.appendChild(pageEl);
+        }
+
+        Element commonData = findChildElementByLocalName(root, "CommonData");
+        if (commonData != null) {
+            setTextChildByLocalName(doc, commonData, "PageCount", String.valueOf(pageCount));
+        }
+
+        zipEntries.put(docXmlPath, serializeXml(doc));
+    }
+
+    private Element findChildElementByLocalName(Element parent, String localName) {
+        NodeList children = parent.getChildNodes();
+        for (int i = 0; i < children.getLength(); i++) {
+            Node n = children.item(i);
+            if (n instanceof Element e && localName.equals(localNameOf(e))) {
+                return e;
+            }
+        }
+        return null;
+    }
+
+    private Element findFirstChildElementByLocalName(Element parent, String localName) {
+        return findChildElementByLocalName(parent, localName);
+    }
+
+    private void removeChildElementsByLocalName(Element parent, String localName) {
+        NodeList children = parent.getChildNodes();
+        for (int i = children.getLength() - 1; i >= 0; i--) {
+            Node n = children.item(i);
+            if (n instanceof Element e && localName.equals(localNameOf(e))) {
+                parent.removeChild(n);
+            }
+        }
+    }
+
+    private void setTextChildByLocalName(Document doc, Element parent, String localName, String text) {
+        Element existing = findChildElementByLocalName(parent, localName);
+        if (existing != null) {
+            existing.setTextContent(text);
+            return;
+        }
+        String ns = parent.getNamespaceURI();
+        Element child = ns != null ? doc.createElementNS(ns, localName) : doc.createElement(localName);
+        child.setTextContent(text);
+        parent.appendChild(child);
+    }
+
+    private String localNameOf(Element e) {
+        String name = e.getNodeName();
+        int colon = name.indexOf(':');
+        return colon >= 0 ? name.substring(colon + 1) : name;
     }
 
     /**

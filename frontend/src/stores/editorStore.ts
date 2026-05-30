@@ -73,9 +73,93 @@ export const useEditorStore = defineStore('editor', () => {
     const isAnnotationTool = computed(() => currentTool.value !== 'SELECT')
 
     // ==================== 原有方法 ====================
+    function ensurePageIds() {
+        if (!document.value) return
+        const ts = Date.now()
+        document.value.pages.forEach((p, i) => {
+            if (!p.id) p.id = `page-${ts}-${i}`
+            if (p.sourcePageIndex == null) p.sourcePageIndex = i
+        })
+    }
+
+    function remapAnnotationsAfterInsert(insertAt: number, newPageAnns: AnnotationData[]) {
+        const count = document.value!.pageCount
+        const shifted: Record<number, AnnotationData[]> = {}
+        for (let i = 0; i < count; i++) {
+            if (i < insertAt) {
+                shifted[i] = (annotationsMap[i] ?? []).map(a => ({ ...a, pageIndex: i }))
+            } else if (i === insertAt) {
+                shifted[i] = newPageAnns.map(a => ({ ...a, pageIndex: i }))
+            } else {
+                shifted[i] = (annotationsMap[i - 1] ?? []).map(a => ({ ...a, pageIndex: i }))
+            }
+        }
+        for (const key of Object.keys(annotationsMap)) {
+            delete annotationsMap[Number(key)]
+        }
+        for (const [k, v] of Object.entries(shifted)) {
+            annotationsMap[Number(k)] = v
+        }
+    }
+
+    function remapAnnotationsAfterDelete(deletedIndex: number) {
+        if (!document.value) return
+        const count = document.value.pageCount
+        const next: Record<number, AnnotationData[]> = {}
+        for (let i = 0; i < count; i++) {
+            const srcIdx = i >= deletedIndex ? i + 1 : i
+            next[i] = (annotationsMap[srcIdx] ?? []).map(a => ({ ...a, pageIndex: i }))
+        }
+        for (const key of Object.keys(annotationsMap)) {
+            delete annotationsMap[Number(key)]
+        }
+        for (const [k, v] of Object.entries(next)) {
+            annotationsMap[Number(k)] = v
+        }
+    }
+
+    function remapAnnotationsAfterMove(fromIndex: number, toIndex: number) {
+        if (!document.value) return
+        const n = document.value.pageCount
+        const order = Array.from({ length: n }, (_, i) => i)
+        const [moved] = order.splice(fromIndex, 1)
+        order.splice(toIndex, 0, moved)
+
+        const snapshot: Record<number, AnnotationData[]> = {}
+        for (const key of Object.keys(annotationsMap)) {
+            snapshot[Number(key)] = [...(annotationsMap[Number(key)] ?? [])]
+        }
+        for (const key of Object.keys(annotationsMap)) {
+            delete annotationsMap[Number(key)]
+        }
+        for (let newIdx = 0; newIdx < n; newIdx++) {
+            const oldIdx = order[newIdx]
+            annotationsMap[newIdx] = (snapshot[oldIdx] ?? []).map(a => ({
+                ...a,
+                pageIndex: newIdx,
+            }))
+        }
+    }
+
+    function adjustCurrentPageAfterMove(fromIndex: number, toIndex: number) {
+        const cur = currentPageIndex.value
+        if (cur === fromIndex) {
+            currentPageIndex.value = toIndex
+        } else if (fromIndex < toIndex) {
+            if (cur > fromIndex && cur <= toIndex) currentPageIndex.value = cur - 1
+        } else if (fromIndex > toIndex) {
+            if (cur >= toIndex && cur < fromIndex) currentPageIndex.value = cur + 1
+        }
+    }
+
+    function newElementId(prefix: string, index: number) {
+        return `${prefix}-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`
+    }
+
     function setDocument(doc: DocumentData) {
         if (doc.fileId) fileId.value = doc.fileId
         document.value = doc
+        ensurePageIds()
         currentPageIndex.value = 0
         selectedElementId.value = null
         selectedAnnotationId.value = null
@@ -155,6 +239,7 @@ export const useEditorStore = defineStore('editor', () => {
     function insertPage(position: number) {
         if (!document.value) return
         const newPage: PageData = {
+            id: `page-${Date.now()}-new`,
             pageIndex: position,
             width: 210,
             height: 297,
@@ -163,6 +248,10 @@ export const useEditorStore = defineStore('editor', () => {
         document.value.pages.splice(position, 0, newPage)
         document.value.pageCount += 1
         document.value.pages.forEach((p, i) => { p.pageIndex = i })
+        remapAnnotationsAfterInsert(position, [])
+        if (currentPageIndex.value >= position) {
+            currentPageIndex.value += 1
+        }
         saveToHistory()
     }
 
@@ -171,21 +260,115 @@ export const useEditorStore = defineStore('editor', () => {
         document.value.pages.splice(pageIndex, 1)
         document.value.pageCount -= 1
         document.value.pages.forEach((p, i) => { p.pageIndex = i })
-        currentPageIndex.value = Math.min(
-            currentPageIndex.value,
-            document.value.pageCount - 1
-        )
+        remapAnnotationsAfterDelete(pageIndex)
+        if (currentPageIndex.value >= pageIndex) {
+            currentPageIndex.value = Math.max(0, currentPageIndex.value - 1)
+        }
+        currentPageIndex.value = Math.min(currentPageIndex.value, document.value.pageCount - 1)
+        saveToHistory()
+    }
+
+    /** 将页面从 fromIndex 拖到 toIndex */
+    function movePage(fromIndex: number, toIndex: number) {
+        if (!document.value) return
+        const n = document.value.pageCount
+        if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0 || fromIndex >= n || toIndex >= n) {
+            return
+        }
+        const pages = document.value.pages
+        const [page] = pages.splice(fromIndex, 1)
+        pages.splice(toIndex, 0, page)
+        pages.forEach((p, i) => { p.pageIndex = i })
+        remapAnnotationsAfterMove(fromIndex, toIndex)
+        adjustCurrentPageAfterMove(fromIndex, toIndex)
         saveToHistory()
     }
 
     function reorderPages(newOrder: number[]) {
         if (!document.value) return
+        const n = document.value.pageCount
+        if (newOrder.length !== n) return
+
         const oldPages = [...document.value.pages]
+        const oldAnns: Record<number, AnnotationData[]> = {}
+        for (const key of Object.keys(annotationsMap)) {
+            oldAnns[Number(key)] = [...(annotationsMap[Number(key)] ?? [])]
+        }
+
         document.value.pages = newOrder.map((oldIdx, newIdx) => ({
             ...oldPages[oldIdx],
             pageIndex: newIdx,
         }))
+
+        for (const key of Object.keys(annotationsMap)) {
+            delete annotationsMap[Number(key)]
+        }
+        for (let newIdx = 0; newIdx < n; newIdx++) {
+            const oldIdx = newOrder[newIdx]
+            annotationsMap[newIdx] = (oldAnns[oldIdx] ?? []).map(a => ({
+                ...a,
+                pageIndex: newIdx,
+            }))
+        }
+
+        const oldCur = currentPageIndex.value
+        const newCur = newOrder.indexOf(oldCur)
+        currentPageIndex.value = newCur >= 0 ? newCur : 0
         saveToHistory()
+    }
+
+    /** 复制页面（含元素与注释），默认插入到源页之后 */
+    async function copyPage(sourceIndex: number, insertAt?: number) {
+        if (!document.value) return
+        const src = document.value.pages[sourceIndex]
+        if (!src) return
+
+        const position = insertAt ?? sourceIndex + 1
+        const ts = Date.now()
+
+        const clonedPage: PageData = JSON.parse(JSON.stringify(src))
+        clonedPage.id = `page-${ts}-copy`
+        clonedPage.pageIndex = position
+        clonedPage.sourcePageIndex = src.sourcePageIndex ?? sourceIndex
+        clonedPage.elements = clonedPage.elements.map((el, i) => ({
+            ...el,
+            id: newElementId('el', i),
+        }))
+
+        document.value.pages.splice(position, 0, clonedPage)
+        document.value.pageCount += 1
+        document.value.pages.forEach((p, i) => { p.pageIndex = i })
+
+        const srcAnns = annotationsMap[sourceIndex] ?? []
+        let copiedAnns: AnnotationData[] = srcAnns.map((ann, i) => {
+            const copy = JSON.parse(JSON.stringify(ann)) as AnnotationData
+            copy.id = newElementId('ann', i)
+            copy.pageIndex = position
+            copy.createdAt = ts
+            copy.updatedAt = ts
+            return copy
+        })
+
+        remapAnnotationsAfterInsert(position, copiedAnns)
+
+        if (fileId.value && copiedAnns.length > 0) {
+            const persisted: AnnotationData[] = []
+            for (const ann of copiedAnns) {
+                const { id, createdAt, updatedAt, ...payload } = ann
+                const saved = await ofdApi.addAnnotation(
+                    fileId.value,
+                    payload as Omit<AnnotationData, 'id' | 'createdAt' | 'updatedAt'>,
+                )
+                persisted.push(saved)
+            }
+            annotationsMap[position] = persisted
+        }
+
+        currentPageIndex.value = position
+        selectedElementId.value = null
+        selectedAnnotationId.value = null
+        saveToHistory()
+        return position
     }
 
     function saveToHistory() {
@@ -428,7 +611,7 @@ export const useEditorStore = defineStore('editor', () => {
         setDocument, setCurrentFile, setCurrentPage,
         selectElement, setScale, setLoading,
         updateElement, resetElement,
-        insertPage, deletePage, reorderPages,
+        insertPage, deletePage, movePage, copyPage, reorderPages,
         saveToHistory, undo, redo, getDocumentForSave,
         // ── 注释方法 ──
         setTool, setAnnotationColor, setAnnotationOpacity,

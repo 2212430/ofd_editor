@@ -73,6 +73,7 @@
         <RibbonSep />
         <RibbonGroup label="页面">
           <RibbonButton label="插入页面" :icon="Plus" :disabled="!store.document" @click="handleInsertPage" />
+          <RibbonButton label="复制页面" :icon="CopyDocument" :disabled="!store.document" @click="handleCopyPage" />
           <RibbonButton label="删除页面" :icon="Delete" :disabled="!store.document || (store.document?.pageCount ?? 0) <= 1" @click="handleDeletePage" />
         </RibbonGroup>
       </template>
@@ -172,8 +173,8 @@
         <RibbonGroup label="页面结构">
           <RibbonButton label="插入页面" :icon="Plus" :disabled="!store.document" @click="handleInsertPage" />
           <RibbonButton label="删除页面" :icon="Delete" :disabled="!store.document || (store.document?.pageCount ?? 0) <= 1" @click="handleDeletePage" />
-          <RibbonButton label="复制页面" :icon="CopyDocument" disabled tooltip="即将推出" @click="comingSoon" />
-          <RibbonButton label="重排页面" :icon="Sort" disabled tooltip="即将推出" @click="comingSoon" />
+          <RibbonButton label="复制页面" :icon="CopyDocument" :disabled="!store.document" @click="handleCopyPage" />
+          <RibbonButton label="重排页面" :icon="Sort" :disabled="!store.document" tooltip="拖动左侧缩略图调整顺序" @click="handleReorderHint" />
         </RibbonGroup>
         <RibbonSep />
         <RibbonGroup label="高级">
@@ -413,7 +414,24 @@ function handleResetElement() {
 
 function handleInsertPage() {
   store.insertPage(store.currentPageIndex + 1)
-  ElMessage.success(`已在第${store.currentPageIndex + 1}页后插入空白页`)
+  ElMessage.success(`已在第 ${store.currentPageIndex + 1} 页后插入空白页`)
+}
+
+async function handleCopyPage() {
+  if (!store.document) return
+  const src = store.currentPageIndex
+  try {
+    const newIndex = await store.copyPage(src)
+    if (newIndex !== undefined) {
+      ElMessage.success(`已复制第 ${src + 1} 页为第 ${newIndex + 1} 页`)
+    }
+  } catch (err: any) {
+    ElMessage.error(err?.message || '复制页面失败')
+  }
+}
+
+function handleReorderHint() {
+  ElMessage.info('请在左侧页面列表中拖动缩略图调整页面顺序')
 }
 
 async function handleDeletePage() {

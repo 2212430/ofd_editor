@@ -67,6 +67,7 @@ public class OfdParseService {
                     log.error("解析第{}页失败: {}", i + 1, e.getMessage(), e);
                     PageDTO emptyPage = new PageDTO();
                     emptyPage.setPageIndex(i);
+                    emptyPage.setSourcePageIndex(i);
                     emptyPage.setWidth(210.0);
                     emptyPage.setHeight(297.0);
                     emptyPage.setElements(new ArrayList<>());
@@ -375,6 +376,7 @@ public class OfdParseService {
     private PageDTO parsePage(OFDReader reader, int pageIndex, ParseContext ctx) {
         PageDTO pageDTO = new PageDTO();
         pageDTO.setPageIndex(pageIndex);
+        pageDTO.setSourcePageIndex(pageIndex);
         int pageNum = pageIndex + 1;
 
         // 页面尺寸

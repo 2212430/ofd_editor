@@ -104,7 +104,11 @@ export interface AnnotationData {
 
 // ========== 页面数据（扩展加入注释） ==========
 export interface PageData {
+    /** 前端稳定标识，用于列表 key 与拖拽重排 */
+    id?: string
     pageIndex: number
+    /** 对应原始 OFD 页序号（0 基），保存时用于重排/复制 */
+    sourcePageIndex?: number
     width: number
     height: number
     elements: ElementData[]
