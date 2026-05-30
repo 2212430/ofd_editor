@@ -1,11 +1,34 @@
 import axios from 'axios'
-import type { DocumentData, AnnotationData, AnnotationResponse } from '@/types'
+import { ElMessageBox } from 'element-plus'
+import type { DocumentData, AnnotationData } from '@/types'
 
-// axios实例
+// axios实例（常规接口 60s；大文件转换在单次请求里单独加长 timeout）
 const http = axios.create({
     baseURL: '/api/ofd',
-    timeout: 60000,
+    timeout: 60_000,
 })
+
+/** 去掉 Windows / 浏览器不允许的文件名字符 */
+export function sanitizeFilename(name: string): string {
+    const trimmed = (name || 'export').trim() || 'export'
+    return trimmed.replace(/[\\/:*?"<>|]/g, '_')
+}
+
+function formatFileSize(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+/** 后端用 blob 返回错误正文时，把可读信息抛出来 */
+async function ensureBlobOk(data: Blob, contentType?: string): Promise<Blob> {
+    const ct = (contentType ?? data.type ?? '').toLowerCase()
+    if (ct.includes('pdf') || ct.includes('ofd') || ct.includes('octet-stream')) {
+        return data
+    }
+    const text = await data.text()
+    throw new Error(text || '请求失败')
+}
 
 // 响应拦截器
 http.interceptors.response.use(
@@ -31,12 +54,15 @@ export const ofdApi = {
         return res.data
     },
 
-    /** OFD转PDF */
+    /** OFD转PDF（42 页级文档转换可能超过 60s，单独放宽超时） */
     toPdf: async (file: File): Promise<Blob> => {
         const form = new FormData()
         form.append('file', file)
-        const res = await http.post('/to-pdf', form, { responseType: 'blob' })
-        return res.data
+        const res = await http.post('/to-pdf', form, {
+            responseType: 'blob',
+            timeout: 600_000,
+        })
+        return ensureBlobOk(res.data, res.headers['content-type'])
     },
 
     /** PDF转OFD */
@@ -182,14 +208,46 @@ export const ofdApi = {
     },
 }
 
-/** 下载Blob文件 */
+/** 下载 Blob 文件（同步触发，需在用户点击事件回调里调用） */
 export function downloadBlob(blob: Blob, filename: string) {
+    const safeName = sanitizeFilename(filename)
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = filename
+    a.download = safeName
+    a.rel = 'noopener'
+    a.style.display = 'none'
     document.body.appendChild(a)
     a.click()
-    document.body.removeChild(a)
-    URL.revokeObjectURL(url)
+    // 大文件（10MB+）若立刻 revoke，Chrome/Edge 可能还没写完就中断下载
+    setTimeout(() => {
+        document.body.removeChild(a)
+        URL.revokeObjectURL(url)
+    }, 60_000)
+}
+
+/**
+ * 异步任务完成后弹出「下载」按钮，由用户再点一次保存。
+ * 长时间 await 之后直接 a.click() 会被浏览器当成非用户手势而静默拦截。
+ */
+export async function promptDownloadBlob(blob: Blob, filename: string): Promise<boolean> {
+    const safeName = sanitizeFilename(filename)
+    try {
+        await ElMessageBox.confirm(
+            `文件已生成（${formatFileSize(blob.size)}）。\n` +
+            `文件名：${safeName}\n\n` +
+            `由于转换耗时较长，请点击「下载」保存到浏览器默认下载目录（通常是「下载」文件夹）。`,
+            '导出完成',
+            {
+                confirmButtonText: '下载',
+                cancelButtonText: '稍后',
+                type: 'success',
+                closeOnClickModal: false,
+            },
+        )
+        downloadBlob(blob, safeName)
+        return true
+    } catch {
+        return false
+    }
 }

@@ -222,7 +222,7 @@ import {
   ChatLineSquare, Memo, Pointer,
 } from '@element-plus/icons-vue'
 import { useEditorStore } from '@/stores/editorStore'
-import { ofdApi, downloadBlob } from '@/api/ofdApi'
+import { ofdApi, downloadBlob, promptDownloadBlob } from '@/api/ofdApi'
 
 const store       = useEditorStore()
 const ofdInputRef = ref<HTMLInputElement>()
@@ -313,11 +313,16 @@ async function handleSaveOfd() {
 
 async function handleExportPdf() {
   if (!store.currentFile) { ElMessage.warning('请先打开OFD文件'); return }
-  store.setLoading(true, '正在导出PDF...')
+  store.setLoading(true, '正在导出PDF（页数较多时请耐心等待）...')
   try {
     const blob = await ofdApi.toPdf(store.currentFile)
-    downloadBlob(blob, `${store.document?.title ?? 'export'}.pdf`)
-    ElMessage.success('导出成功！')
+    const filename = `${store.document?.title ?? 'export'}.pdf`
+    const saved = await promptDownloadBlob(blob, filename)
+    if (saved) {
+      ElMessage.success('PDF 已开始下载，请在浏览器下载栏或「下载」文件夹中查看')
+    } else {
+      ElMessage.info('已取消下载；可再次点击「导出PDF」重新生成')
+    }
   } catch (err: any) {
     ElMessage.error(err.message || '导出失败')
   } finally {

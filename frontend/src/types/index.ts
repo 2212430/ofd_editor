@@ -60,6 +60,8 @@ export interface ElementData {
     imageUrl?: string
     imageData?: string
     isDirty?: boolean
+    /** 用户在属性面板手动改过字号；为 true 时前端不再按外接框高度自动 clamp 字号 */
+    fontSizeOverridden?: boolean
     originalX?: number
     originalY?: number
     originalWidth?: number

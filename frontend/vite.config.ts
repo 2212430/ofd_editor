@@ -19,6 +19,9 @@ export default defineConfig({
             '/api': {
                 target: 'http://localhost:8080',
                 changeOrigin: true,
+                // OFD→PDF 大文档转换可能超过 1 分钟
+                timeout: 600_000,
+                proxyTimeout: 600_000,
             },
         },
     },

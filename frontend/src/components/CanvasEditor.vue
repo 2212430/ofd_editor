@@ -235,6 +235,50 @@ const transformerRef           = ref()
 const annotationLayerRef       = ref()
 const annotationTransformerRef = ref()
 
+/**
+ * 撤销 / 重做兜底刷新：
+ * store.renderVersion 在 undo / redo 后 +1。
+ *
+ * 之前发现 vue-konva 的 `watch(() => props.config, …, { deep:true })`
+ * 在 applyInPlace 之后并不会重新触发（props.config 由父组件每次 render 时新建，
+ * 但父组件的 render effect 在某些 element 属性变化下不一定调度执行，
+ * 导致 Konva 节点的 text / fontSize / fill 停留在撤销前的值）。
+ *
+ * 这里走两条路兜底：
+ *   1) 等下一个 tick（Vue 把可能的 patch 都跑完），从 stage 上把所有 Konva.Text 节点找出来；
+ *      根据当前 store 里的 element 数据手动写一遍 text / fontSize / fill 等关键字段，
+ *      并清掉 Konva 内部的 measure cache。
+ *   2) 最后再来一次 stage.draw() 强制重绘。
+ */
+watch(
+    () => store.renderVersion,
+    () => {
+      nextTick(() => {
+        const stage = stageRef.value?.getNode?.()
+        if (!stage) return
+
+        const page = store.currentPage
+        if (page) {
+          // Konva 节点用 element.id 作为内部 id 属性；按 id 找回节点，
+          // 直接把最新 store 数据写到节点上，绕开 vue-konva deep watcher 漏发的情况
+          for (const el of page.elements) {
+            const node: any = stage.findOne('#' + el.id)
+            if (!node) continue
+            if (el.type === 'TEXT') {
+              node.setAttrs(getTextConfig(el))
+            } else if (el.type === 'PATH') {
+              node.setAttrs(getPathConfig(el))
+            } else if (el.type === 'IMAGE' && imageMap[el.id]) {
+              node.setAttrs(getImageConfig(el))
+            }
+            node.clearCache?.()
+          }
+        }
+        stage.draw()
+      })
+    },
+)
+
 // ─────────────────────────────────────────────
 // 常量
 // ─────────────────────────────────────────────
@@ -901,6 +945,35 @@ function getPathData(element: ElementData): string {
   return (typeof e.pathData === 'string' && e.pathData.trim()) ? e.pathData.trim() : ''
 }
 
+/**
+ * 按字符大致猜测系统字体下的水平 advance（单位：em，即与 fontSize 同量纲）
+ * OFD 原文常用嵌入字体的 Glyph 宽度排版；替换为系统字体后宽度会偏窄，因此需要估算
+ * 自然渲染宽度，再用 letterSpacing 补差到 Boundary.w，避免片段间产生可见间隙。
+ */
+function approxAdvanceEm(ch: string): number {
+  if (!ch || ch === '\n') return 0
+  const code = ch.charCodeAt(0)
+  // CJK 统一汉字 / 兼容汉字 / 全角符号 / 假名 / 谚文 → 全角字符
+  if (
+      (code >= 0x2e80 && code <= 0x9fff) ||
+      (code >= 0xa000 && code <= 0xa4cf) ||
+      (code >= 0xac00 && code <= 0xd7af) ||
+      (code >= 0xf900 && code <= 0xfaff) ||
+      (code >= 0xff00 && code <= 0xffef) ||
+      (code >= 0x3000 && code <= 0x303f)
+  ) return 1.0
+  if (ch === ' ') return 0.32
+  if (/[il.,;:'!|`]/.test(ch)) return 0.30
+  if (/[A-Z0-9#&%@$]/.test(ch)) return 0.62
+  return 0.55
+}
+
+function estimateNaturalWidthMm(text: string, fsMm: number): number {
+  let sum = 0
+  for (const ch of text) sum += approxAdvanceEm(ch)
+  return sum * fsMm
+}
+
 function getTextConfig(element: ElementData) {
   const isSelected = store.selectedElementId === element.id
   const content    = element.content ?? ''
@@ -914,12 +987,27 @@ function getTextConfig(element: ElementData) {
   let fsPx = fsMm * MM_TO_PX * store.scale
   const hPx = hMm > 0 ? hMm * MM_TO_PX * store.scale : 0
   const wPx = wMm > 0 ? wMm * MM_TO_PX * store.scale : 0
-  if (isVertical) {
+  // 用户在属性面板手动改过字号 → 绝对尊重用户输入，跳过任何按外接框尺寸的兜底裁剪
+  const userOverride = element.fontSizeOverridden === true
+  if (isVertical && !userOverride) {
     // 竖排：字号上限取列宽（避免溢出到隔壁列）
     if (wPx > 0) fsPx = Math.min(fsPx, wPx * 0.92)
-  } else if (!hasNl && hPx > 2 && (wPx <= 0 || hPx < wPx * 1.5)) {
+  } else if (!userOverride && !hasNl && hPx > 2 && (wPx <= 0 || hPx < wPx * 1.5)) {
     /** 横向条带：ofdrw 字号偶发偏小，用外接框高度抬到可读下限；避免误判导致“微尘字” */
     fsPx = Math.min(hPx * 0.94, Math.max(fsPx, hPx * 0.56))
+  }
+
+  // 替换字体下的横向 advance 与 OFD 原 Glyph 不一致，按 Boundary.w 补 letterSpacing 把片段撑满
+  let letterSpacing = 0
+  if (!isVertical && !hasNl && wMm > 0 && content.length > 1) {
+    const fsMmRendered = fsPx / (MM_TO_PX * store.scale)
+    const naturalMm    = estimateNaturalWidthMm(content, fsMmRendered)
+    const gapMm        = wMm - naturalMm
+    if (gapMm > 0.05) {
+      const lsMm = gapMm / (content.length - 1)
+      // 单字符间距上限不超过 0.6em，避免极端情况下字符拉得过散
+      letterSpacing = Math.min(lsMm, fsMmRendered * 0.6) * MM_TO_PX * store.scale
+    }
   }
 
   const fontStack = [element.fontFamily, 'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', 'sans-serif']
@@ -934,6 +1022,7 @@ function getTextConfig(element: ElementData) {
     draggable:      !store.isAnnotationTool,
     text:           content,
     fontSize:       fsPx,
+    letterSpacing,
     lineHeight:     hasNl ? (isVertical ? 1.05 : 1.25) : 1.15,
     fontFamily:     fontStack,
     fontStyle:      `${element.bold ? 'bold' : 'normal'} ${element.italic ? 'italic' : ''}`.trim(),

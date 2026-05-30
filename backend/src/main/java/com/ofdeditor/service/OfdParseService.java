@@ -1636,15 +1636,16 @@ public class OfdParseService {
                 if (content != null) sb.append(content);
             }
 
-            // 字号修正：仅在水平单行短文本时按外接框高度回拽到可读区间；
-            // 竖排或多行场景下用 Size×scale 即可，避免按整列高度把字号撑爆。
+            // 字号兜底：只在反射拿到的 Size×scale 异常偏小时用 Boundary 高度抬到可读下限。
+            // 不做上界裁剪 —— 拉丁/数字内嵌片段（如 "AIoT"）的 Boundary.h 紧贴大写字母高度，
+            // 比真实字号小 1.3 倍以上是常见现象；若强行下压会让英文比相邻中文明显矮一截。
             if (!verticalLayout
                     && !sb.toString().contains("\n")
                     && finalRect != null && finalRect.h != null && finalRect.h > 0.1
                     && finalRect.w != null && finalRect.w > 0
                     && finalRect.h < finalRect.w * 1.5) {
                 double hBased = finalRect.h * 0.78;
-                corrected = clamp(corrected, hBased * 0.6, hBased * 1.4);
+                if (corrected < hBased * 0.6) corrected = hBased;
             }
             dto.setFontSize(corrected);
             dto.setContent(sb.toString());
@@ -2269,10 +2270,6 @@ public class OfdParseService {
 
     private Double safeSize(Double v, Double fallback) {
         return (v == null || !Double.isFinite(v) || v <= 0) ? fallback : v;
-    }
-
-    private double clamp(double val, double min, double max) {
-        return Math.max(min, Math.min(max, val));
     }
 
     private Double tryParseDouble(String s) {

@@ -1,4 +1,4 @@
-import { defineStore } from 'pinia'
+import { defineStore, acceptHMRUpdate } from 'pinia'
 import { ref, computed, reactive } from 'vue'
 import type {
     DocumentData, ElementData, PageData,
@@ -20,6 +20,11 @@ export const useEditorStore = defineStore('editor', () => {
 
     const history = ref<DocumentData[]>([])
     const historyIndex = ref(-1)
+    /**
+     * 撤销 / 重做触发后单调递增。CanvasEditor 监听该计数并显式调用 Konva stage.batchDraw()，
+     * 兜底 vue-konva deep watcher 在 ref 整体替换 + 多页文本场景下偶尔漏发的 setAttrs。
+     */
+    const renderVersion = ref(0)
 
     // ==================== 注释相关状态 ====================
     const currentTool = ref<ToolType>('SELECT')
@@ -119,7 +124,11 @@ export const useEditorStore = defineStore('editor', () => {
             element.originalRotation = element.rotation ?? 0
         }
 
-        Object.assign(element, changes, { isDirty: true })
+        const next: Partial<ElementData> & { isDirty: true } = { ...changes, isDirty: true }
+        // 用户在属性面板改了字号 → 关掉前端自动 clamp，让用户输入真正生效
+        if (changes.fontSize !== undefined) next.fontSizeOverridden = true
+
+        Object.assign(element, next)
         saveToHistory()
     }
 
@@ -181,20 +190,86 @@ export const useEditorStore = defineStore('editor', () => {
         const snapshot = JSON.parse(JSON.stringify(document.value))
         history.value = history.value.slice(0, historyIndex.value + 1)
         history.value.push(snapshot)
-        if (history.value.length > 50) history.value.shift()
-        historyIndex.value = history.value.length - 1
+        if (history.value.length > 50) {
+            history.value.shift()
+            historyIndex.value = history.value.length - 1
+        } else {
+            historyIndex.value = history.value.length - 1
+        }
+    }
+
+    /**
+     * 递归把 source 的内容写到 target 上（原地修改，保留 target 的引用）。
+     *
+     * 旧实现里 undo / redo 用 `document.value = JSON.parse(JSON.stringify(snap))`
+     * 整个把 document 换成新对象。这样虽然 Pinia / Vue 顶层 ref 会触发，但
+     * vue-konva 的 v-text 用的是 `watch(() => a.config, ..., { deep: true })`，
+     * 在某些时序下新旧 config 的 deep diff 不能稳定唤醒 Konva 节点的 setAttrs，
+     * 导致数据回退了但 canvas 上 text/fontSize/fill 依旧停留在撤销前。
+     *
+     * 改成原地深合并后，每个 element 上 content/fontSize/color 这类原子字段
+     * 的赋值都会直接命中 reactive proxy，Vue 会按属性触发 getTextConfig 重算，
+     * vue-konva 的 watcher 也能稳定拿到 diff 后的新 config。
+     */
+    function applyInPlace(target: any, source: any): void {
+        if (Array.isArray(target) && Array.isArray(source)) {
+            if (target.length > source.length) target.length = source.length
+            for (let i = 0; i < source.length; i++) {
+                const tv = target[i]
+                const sv = source[i]
+                if (tv && sv && typeof tv === 'object' && typeof sv === 'object') {
+                    applyInPlace(tv, sv)
+                } else {
+                    target[i] = sv
+                }
+            }
+            return
+        }
+        if (target && source && typeof target === 'object' && typeof source === 'object') {
+            for (const k of Object.keys(target)) {
+                if (!(k in source)) delete target[k]
+            }
+            for (const k of Object.keys(source)) {
+                const tv = target[k]
+                const sv = source[k]
+                if (tv && sv && typeof tv === 'object' && typeof sv === 'object'
+                    && Array.isArray(tv) === Array.isArray(sv)) {
+                    applyInPlace(tv, sv)
+                } else {
+                    target[k] = sv
+                }
+            }
+        }
+    }
+
+    function restoreFromHistory(idx: number) {
+        if (idx < 0 || idx >= history.value.length) return
+        const snap = JSON.parse(JSON.stringify(history.value[idx]))
+        if (!document.value) {
+            document.value = snap
+        } else {
+            applyInPlace(document.value, snap)
+        }
+        // 选中的元素如果在新快照里被删了，需要清掉选中态避免 PropertyPanel 报空指针
+        if (selectedElementId.value) {
+            const page = document.value?.pages[currentPageIndex.value]
+            const stillExists = page?.elements.some(e => e.id === selectedElementId.value)
+            if (!stillExists) selectedElementId.value = null
+        }
     }
 
     function undo() {
         if (!canUndo.value) return
         historyIndex.value -= 1
-        document.value = JSON.parse(JSON.stringify(history.value[historyIndex.value]))
+        restoreFromHistory(historyIndex.value)
+        renderVersion.value++
     }
 
     function redo() {
         if (!canRedo.value) return
         historyIndex.value += 1
-        document.value = JSON.parse(JSON.stringify(history.value[historyIndex.value]))
+        restoreFromHistory(historyIndex.value)
+        renderVersion.value++
     }
 
     function getDocumentForSave(): DocumentData | null {
@@ -337,7 +412,7 @@ export const useEditorStore = defineStore('editor', () => {
         // ── 原有状态 ──
         document, currentPageIndex, selectedElementId,
         scale, isLoading, loadingText, currentFile,
-        history, historyIndex, fileId,
+        history, historyIndex, fileId, renderVersion,
         // ── 注释状态 ──
         currentTool, annotationsMap, selectedAnnotationId,
         annotationColor, annotationOpacity, annotationLineWidth,
@@ -359,3 +434,8 @@ export const useEditorStore = defineStore('editor', () => {
         exportWithAnnotations,
     }
 })
+
+// 让 Vite HMR 时直接热替换 store 函数（包括 undo / redo），不需要刷整个页面
+if (import.meta.hot) {
+    import.meta.hot.accept(acceptHMRUpdate(useEditorStore, import.meta.hot))
+}

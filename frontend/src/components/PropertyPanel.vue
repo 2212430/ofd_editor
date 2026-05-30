@@ -204,16 +204,21 @@
           <el-divider style="margin: 8px 0" />
           <div class="form-item">
             <label>文本内容</label>
+            <!--
+              用 v-model 绑本地 ref + @change 提交：
+              1) v-model 双向同步，撤销/重做后 store 改变能立刻反映在 textarea；
+              2) @change 失焦时一次性提交，整段编辑算作一条 history，避免每键一次撤销
+            -->
             <el-input
-                :model-value="store.selectedElement.content"
+                v-model="editContent"
                 type="textarea" :rows="3" size="small"
-                @input="(v: string) => update({ content: v })"
+                @change="(v: string) => update({ content: v })"
             />
           </div>
           <div class="form-item">
             <label>字体大小</label>
             <el-input-number
-                :model-value="store.selectedElement.fontSize ?? 12"
+                v-model="editFontSize"
                 size="small" :min="6" :max="200" :step="1"
                 @change="(v: number) => update({ fontSize: v })"
             />
@@ -221,7 +226,7 @@
           <div class="form-item">
             <label>字体颜色</label>
             <el-color-picker
-                :model-value="store.selectedElement.color ?? '#000000'"
+                v-model="editElementColor"
                 size="small"
                 @change="(v: string) => update({ color: v })"
             />
@@ -253,8 +258,9 @@ import type { ElementData, AnnotationData } from '@/types'
 const store = useEditorStore()
 
 const selectedAnnotation = computed(() => store.selectedAnnotation)
+const selectedElement    = computed(() => store.selectedElement)
 
-// ─── 本地缓存：颜色 / 透明度 / 字体颜色 ───────────────────────────────────
+// ─── 本地缓存：注释颜色 / 透明度 / 字体颜色 ──────────────────────────────
 // 用独立 ref 驱动 v-model，避免 computed plain object 不触发响应式的问题
 const editColor     = ref<string>('#000000')
 const editOpacity   = ref<number>(1)
@@ -269,6 +275,31 @@ watch(
         editOpacity.value   = ann.opacity   ?? 1
         editFontColor.value = ann.fontColor ?? '#000000'
       }
+    },
+    { immediate: true }
+)
+
+// ─── 本地缓存：OFD 文本元素 内容/字号/颜色 ───────────────────────────────
+// 同样用独立 ref 驱动 v-model；store.selectedElement 变化（包括 undo / redo
+// 替换 document 后产生的新对象）通过下方 watch 同步回这三个 ref，确保 textarea
+// 和 ColorPicker 内部状态在撤销后立刻刷成历史快照里的值。
+const editContent      = ref<string>('')
+const editFontSize     = ref<number>(12)
+const editElementColor = ref<string>('#000000')
+
+watch(
+    // 监听 id + 关键字段，撤销/重做后 selectedElement 是新对象但 id 一致
+    () => {
+      const el = selectedElement.value
+      return el
+          ? { id: el.id, content: el.content, fontSize: el.fontSize, color: el.color }
+          : null
+    },
+    (snap) => {
+      if (!snap) return
+      editContent.value      = snap.content ?? ''
+      editFontSize.value     = snap.fontSize ?? 12
+      editElementColor.value = snap.color ?? '#000000'
     },
     { immediate: true }
 )

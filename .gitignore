@@ -7,6 +7,21 @@ frontend/dist/
 
 # IDE / OS
 .idea/
+.vscode/
 *.iml
 .DS_Store
 Thumbs.db
+
+# Thesis / research artifacts (not part of the project)
+docs/
+scripts/
+*.docx
+*.pdf
+*.ofd
+
+# Temp / working files
+.tmp/
+.tmp-*/
+.tmp-*
+南开大学软件学院本科生毕业论文模板*/
+软件著作权申请模板/
