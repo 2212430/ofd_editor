@@ -2343,6 +2343,19 @@ public class OfdParseService {
                     q(d.getX()), q(d.getY()), q(d.getWidth()), q(d.getHeight())
             );
         }
+        if ("IMAGE".equals(d.getType())) {
+            // PDF 转 OFD 等场景：同一 ImageObject 会分别从 Content.xml DOM 与 ofdrw 各解析一次
+            if (isNotBlank(d.getResourceId())) {
+                return "IMAGE|res|" + d.getResourceId().trim();
+            }
+            if (isNotBlank(d.getXmlObjId())) {
+                return "IMAGE|obj|" + d.getXmlObjId().trim();
+            }
+            return String.join("|",
+                    safeStr(d.getType()),
+                    q(d.getX()), q(d.getY()), q(d.getWidth()), q(d.getHeight())
+            );
+        }
         return String.join("|",
                 safeStr(d.getType()),
                 safeStr(d.getResourceId()),

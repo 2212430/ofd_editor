@@ -30,13 +30,28 @@ async function ensureBlobOk(data: Blob, contentType?: string): Promise<Blob> {
     throw new Error(text || '请求失败')
 }
 
+/** 从 axios 错误响应中提取可读消息（含 blob 响应体） */
+async function extractErrorMessage(err: unknown): Promise<string> {
+    const ax = err as { response?: { data?: unknown }; message?: string }
+    const data = ax.response?.data
+    if (data instanceof Blob) {
+        try {
+            const text = (await data.text()).trim()
+            if (text) return text
+        } catch { /* ignore */ }
+    }
+    if (typeof data === 'string' && data.trim()) return data.trim()
+    if (data && typeof data === 'object' && 'message' in data) {
+        const m = (data as { message?: string }).message
+        if (m) return m
+    }
+    return ax.message || '请求失败'
+}
+
 // 响应拦截器
 http.interceptors.response.use(
     (res) => res,
-    (err) => {
-        const msg = err.response?.data || err.message || '请求失败'
-        return Promise.reject(new Error(typeof msg === 'string' ? msg : JSON.stringify(msg)))
-    }
+    async (err) => Promise.reject(new Error(await extractErrorMessage(err))),
 )
 
 export const ofdApi = {
@@ -69,8 +84,11 @@ export const ofdApi = {
     fromPdf: async (file: File): Promise<Blob> => {
         const form = new FormData()
         form.append('file', file)
-        const res = await http.post('/from-pdf', form, { responseType: 'blob' })
-        return res.data
+        const res = await http.post('/from-pdf', form, {
+            responseType: 'blob',
+            timeout: 600_000,
+        })
+        return ensureBlobOk(res.data, res.headers['content-type'])
     },
 
     /** 保存编辑后的OFD（含注释） */

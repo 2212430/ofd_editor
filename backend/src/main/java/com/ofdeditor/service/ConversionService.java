@@ -12,6 +12,7 @@ import org.ofdrw.layout.OFDDoc;
 import org.ofdrw.layout.PageLayout;
 import org.ofdrw.layout.VirtualPage;
 import org.ofdrw.layout.element.Img;
+import org.ofdrw.layout.element.Position;
 import org.ofdrw.reader.OFDReader;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
@@ -29,8 +30,7 @@ public class ConversionService {
 
     private static final double OFD_RENDER_PPM = 150.0 / 25.4; // 150 DPI 转 像素/毫米
     private static final float PDF_RENDER_DPI = 150f;
-    private static final double PAGE_WIDTH_MM = 210.0;
-    private static final double PAGE_HEIGHT_MM = 297.0;
+    private static final double PT_TO_MM = 25.4 / 72.0;
 
     // ─────────────────────────────────────────
     // OFD → PDF
@@ -93,21 +93,28 @@ public class ConversionService {
                 log.info("PDF 共 {} 页", pageCount);
 
                 for (int i = 0; i < pageCount; i++) {
+                    PDPage pdfPage = pdfDoc.getPage(i);
+                    var mediaBox = pdfPage.getMediaBox();
+                    double widthMm = mediaBox.getWidth() * PT_TO_MM;
+                    double heightMm = mediaBox.getHeight() * PT_TO_MM;
+
                     BufferedImage pageImg = renderer.renderImageWithDPI(i, PDF_RENDER_DPI, ImageType.RGB);
                     Path imgPath = Files.createTempFile("page_", ".png");
                     tempImages.add(imgPath);
                     ImageIO.write(pageImg, "PNG", imgPath.toFile());
 
-                    PageLayout layout = new PageLayout(PAGE_WIDTH_MM, PAGE_HEIGHT_MM);
+                    PageLayout layout = new PageLayout(widthMm, heightMm);
                     VirtualPage vPage = new VirtualPage(layout);
                     Img elem = new Img(imgPath);
+                    elem.setPosition(Position.Absolute);
                     elem.setX(0d);
                     elem.setY(0d);
-                    elem.setWidth(PAGE_WIDTH_MM);
-                    elem.setHeight(PAGE_HEIGHT_MM);
+                    elem.setWidth(widthMm);
+                    elem.setHeight(heightMm);
                     vPage.add(elem);
                     ofdDoc.addVPage(vPage);
-                    log.debug("OFD 第 {} 页写入完成", i + 1);
+                    log.debug("OFD 第 {} 页写入完成 {}x{} mm", i + 1,
+                            String.format("%.1f", widthMm), String.format("%.1f", heightMm));
                 }
             }
 
