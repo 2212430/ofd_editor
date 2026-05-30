@@ -1338,4 +1338,64 @@ function getStampConfig(ann: AnnotationData) {
     draggable: annDraggable(),
   }
 }
+
+// ─────────────────────────────────────────────
+// 打印：把当前页渲染成高分辨率 PNG，供打印预览使用
+// ─────────────────────────────────────────────
+/** 当前页所需的位图（OFD 图像 + 图章）是否都已加载完成 */
+function allImagesReady(): boolean {
+  for (const el of props.page.elements) {
+    if (el.type === 'IMAGE') {
+      const src = getImageSrc(el)
+      if (src && !imageMap[el.id] && !imageErrorMap[el.id]) return false
+    }
+  }
+  for (const ann of store.currentPageAnnotations) {
+    if (ann.type === 'STAMP' && ann.stampBase64 && !stampImageMap[ann.id]) return false
+  }
+  return true
+}
+
+/**
+ * 把当前页导出为 PNG dataURL，供打印窗口使用。
+ * @param pixelRatio        输出分辨率倍率（越大越清晰、越慢）
+ * @param includeAnnotations 是否包含注释层
+ */
+async function captureForPrint(
+    pixelRatio = 2,
+    includeAnnotations = true,
+): Promise<{ dataUrl: string; width: number; height: number }> {
+  await nextTick()
+
+  // 等待图片资源加载（最多 ~6s，超时则按现状渲染）
+  const start = Date.now()
+  while (!allImagesReady() && Date.now() - start < 6000) {
+    await new Promise((r) => setTimeout(r, 80))
+  }
+  await nextTick()
+
+  const stage:   any = stageRef.value?.getNode?.()
+  const annLayer: any = annotationLayerRef.value?.getNode?.()
+  const prevAnnVisible = annLayer?.visible?.() ?? true
+
+  if (annLayer && !includeAnnotations) annLayer.visible(false)
+  stage?.draw?.()
+
+  let dataUrl = ''
+  try {
+    dataUrl = stage?.toDataURL?.({ pixelRatio, mimeType: 'image/png' }) ?? ''
+  } catch (e) {
+    console.warn('[print] 画布导出失败（可能存在跨域图片）', e)
+    dataUrl = ''
+  }
+
+  if (annLayer && !includeAnnotations) {
+    annLayer.visible(prevAnnVisible)
+    stage?.draw?.()
+  }
+
+  return { dataUrl, width: props.page.width, height: props.page.height }
+}
+
+defineExpose({ captureForPrint })
 </script>

@@ -1,234 +1,316 @@
 <template>
-  <div class="toolbar-wrapper">
+  <div class="ribbon-shell">
+    <!-- 隐藏文件输入 -->
+    <input ref="ofdInputRef" type="file" accept=".ofd" style="display:none" @change="handleOfdUpload" />
+    <input ref="pdfInputRef" type="file" accept=".pdf" style="display:none" @change="handlePdfImport" />
 
-    <!-- ── 第一行：文件 / 撤销 / 缩放 / 页面操作 ── -->
-    <div class="toolbar toolbar-row1">
-      <input ref="ofdInputRef" type="file" accept=".ofd"
-             style="display:none" @change="handleOfdUpload" />
-      <input ref="pdfInputRef" type="file" accept=".pdf"
-             style="display:none" @change="handlePdfImport" />
+    <!-- 标签栏 -->
+    <nav class="ribbon-tabs">
+      <div class="ribbon-brand">
+        <span class="brand-icon">OFD</span>
+        <span class="brand-name">OFD Studio</span>
+      </div>
+      <button
+          v-for="tab in tabs"
+          :key="tab.id"
+          type="button"
+          class="ribbon-tab"
+          :class="{ active: activeTab === tab.id, disabled: tab.disabled }"
+          :disabled="tab.disabled"
+          @click="switchTab(tab)"
+      >
+        {{ tab.label }}
+      </button>
+      <div class="ribbon-tabs-spacer" />
+      <span v-if="store.document" class="ribbon-doc-title">{{ store.document.title }}</span>
+    </nav>
 
-      <!-- 文件操作 -->
-      <el-button-group>
-        <el-button :icon="Upload" @click="ofdInputRef?.click()">打开OFD</el-button>
-        <el-button :icon="Upload" @click="pdfInputRef?.click()">导入PDF</el-button>
-        <el-button :icon="Download" :disabled="!store.document" @click="handleSaveOfd">保存OFD</el-button>
-        <el-button :icon="Download" :disabled="!store.document" @click="handleExportPdf">导出PDF</el-button>
-      </el-button-group>
+    <!-- Ribbon 面板 -->
+    <div class="ribbon-panel">
+      <!-- ===== 文件 ===== -->
+      <template v-if="activeTab === 'file'">
+        <RibbonGroup label="打开">
+          <RibbonButton label="打开OFD" :icon="FolderOpened" @click="ofdInputRef?.click()" />
+          <RibbonButton label="导入PDF" :icon="Upload" @click="pdfInputRef?.click()" />
+        </RibbonGroup>
+        <RibbonSep />
+        <RibbonGroup label="保存">
+          <RibbonButton label="保存OFD" :icon="DocumentChecked" :disabled="!store.document" @click="handleSaveOfd" />
+          <RibbonButton label="导出PDF" :icon="Download" :disabled="!store.document" @click="handleExportPdf" />
+        </RibbonGroup>
+        <RibbonSep />
+        <RibbonGroup label="输出">
+          <RibbonButton label="打印" :icon="Printer" :disabled="!store.document" @click="store.printDialogVisible = true" />
+          <RibbonButton label="另存为" :icon="CopyDocument" disabled tooltip="即将推出" @click="comingSoon" />
+        </RibbonGroup>
+        <RibbonSep />
+        <RibbonGroup label="文档">
+          <RibbonButton label="文档属性" :icon="InfoFilled" disabled tooltip="即将推出" @click="comingSoon" />
+        </RibbonGroup>
+      </template>
 
-      <el-divider direction="vertical" />
+      <!-- ===== 主页 ===== -->
+      <template v-else-if="activeTab === 'home'">
+        <RibbonGroup label="工具">
+          <RibbonButton label="手型" :icon="Pointer" disabled tooltip="即将推出" @click="comingSoon" />
+          <RibbonButton label="选择" :icon="Rank" :active="store.currentTool === 'SELECT'" @click="store.setTool('SELECT')" />
+        </RibbonGroup>
+        <RibbonSep />
+        <RibbonGroup label="编辑">
+          <RibbonButton label="撤销" :icon="RefreshLeft" :disabled="!store.canUndo" @click="store.undo()" />
+          <RibbonButton label="重做" :icon="RefreshRight" :disabled="!store.canRedo" @click="store.redo()" />
+          <RibbonButton label="重置元素" :icon="RefreshLeft" :disabled="!store.selectedElement?.isDirty" @click="handleResetElement" />
+        </RibbonGroup>
+        <RibbonSep />
+        <RibbonGroup label="缩放">
+          <RibbonButton label="缩小" :icon="ZoomOut" @click="store.setScale(store.scale - 0.25)" />
+          <button type="button" class="ribbon-scale-display" @click="store.setScale(1)">
+            {{ Math.round(store.scale * 100) }}%
+          </button>
+          <RibbonButton label="放大" :icon="ZoomIn" @click="store.setScale(store.scale + 0.25)" />
+          <RibbonButton label="实际大小" :icon="FullScreen" @click="store.setScale(1)" />
+        </RibbonGroup>
+        <RibbonSep />
+        <RibbonGroup label="页面">
+          <RibbonButton label="插入页面" :icon="Plus" :disabled="!store.document" @click="handleInsertPage" />
+          <RibbonButton label="删除页面" :icon="Delete" :disabled="!store.document || (store.document?.pageCount ?? 0) <= 1" @click="handleDeletePage" />
+        </RibbonGroup>
+      </template>
 
-      <!-- 撤销/重做 -->
-      <el-button-group>
-        <el-button :icon="RefreshLeft" :disabled="!store.canUndo" @click="store.undo()">撤销</el-button>
-        <el-button :icon="RefreshRight" :disabled="!store.canRedo" @click="store.redo()">重做</el-button>
-      </el-button-group>
+      <!-- ===== 注释 ===== -->
+      <template v-else-if="activeTab === 'comment'">
+        <RibbonGroup label="模式">
+          <RibbonButton label="选择" :icon="Pointer" :active="store.currentTool === 'SELECT'" @click="store.setTool('SELECT')" />
+        </RibbonGroup>
+        <RibbonSep />
+        <RibbonGroup label="文字标注">
+          <RibbonButton label="高亮" :active="store.currentTool === 'HIGHLIGHT'" @click="store.setTool('HIGHLIGHT')">
+            <template #icon><span class="mark-icon highlight">A</span></template>
+          </RibbonButton>
+          <RibbonButton label="下划线" :active="store.currentTool === 'UNDERLINE'" @click="store.setTool('UNDERLINE')">
+            <template #icon><span class="mark-icon underline">U</span></template>
+          </RibbonButton>
+          <RibbonButton label="删除线" :active="store.currentTool === 'STRIKEOUT'" @click="store.setTool('STRIKEOUT')">
+            <template #icon><span class="mark-icon strike">S</span></template>
+          </RibbonButton>
+        </RibbonGroup>
+        <RibbonSep />
+        <RibbonGroup label="图形">
+          <RibbonButton label="矩形" :icon="ScaleToOriginal" :active="store.currentTool === 'RECTANGLE'" @click="store.setTool('RECTANGLE')" />
+          <RibbonButton label="椭圆" :active="store.currentTool === 'CIRCLE'" @click="store.setTool('CIRCLE')">
+            <template #icon><span class="shape-icon oval">○</span></template>
+          </RibbonButton>
+          <RibbonButton label="箭头" :icon="Right" :active="store.currentTool === 'ARROW'" @click="store.setTool('ARROW')" />
+          <RibbonButton label="手绘" :icon="EditPen" :active="store.currentTool === 'FREEHAND'" @click="store.setTool('FREEHAND')" />
+        </RibbonGroup>
+        <RibbonSep />
+        <RibbonGroup label="文本">
+          <RibbonButton label="文本框" :icon="ChatLineSquare" :active="store.currentTool === 'TEXTBOX'" @click="store.setTool('TEXTBOX')" />
+          <RibbonButton label="便利贴" :icon="Memo" :active="store.currentTool === 'STICKYNOTE'" @click="store.setTool('STICKYNOTE')" />
+        </RibbonGroup>
+        <RibbonSep />
+        <RibbonGroup label="样式">
+          <div class="ribbon-style-row">
+            <span class="style-label">颜色</span>
+            <el-color-picker v-model="annotationColor" size="small" :predefine="predefineColors" />
+          </div>
+          <div class="ribbon-style-row">
+            <span class="style-label">线宽</span>
+            <el-select v-model="annotationLineWidth" size="small" style="width:72px">
+              <el-option :value="1" label="细" />
+              <el-option :value="2" label="中" />
+              <el-option :value="3" label="粗" />
+              <el-option :value="5" label="特粗" />
+            </el-select>
+          </div>
+          <div class="ribbon-style-row">
+            <span class="style-label">透明</span>
+            <el-select v-model="annotationOpacity" size="small" style="width:72px">
+              <el-option :value="0.2" label="20%" />
+              <el-option :value="0.4" label="40%" />
+              <el-option :value="0.6" label="60%" />
+              <el-option :value="0.8" label="80%" />
+              <el-option :value="1.0" label="100%" />
+            </el-select>
+          </div>
+        </RibbonGroup>
+        <RibbonSep />
+        <RibbonGroup label="管理">
+          <RibbonButton label="删除注释" :icon="Delete" :disabled="!store.selectedAnnotationId" @click="handleDeleteAnnotation" />
+          <RibbonButton label="显示/隐藏" :icon="View" disabled tooltip="即将推出" @click="comingSoon" />
+        </RibbonGroup>
+      </template>
 
-      <el-divider direction="vertical" />
+      <!-- ===== 视图 ===== -->
+      <template v-else-if="activeTab === 'view'">
+        <RibbonGroup label="缩放">
+          <RibbonButton label="放大" :icon="ZoomIn" @click="store.setScale(store.scale + 0.25)" />
+          <RibbonButton label="缩小" :icon="ZoomOut" @click="store.setScale(store.scale - 0.25)" />
+          <RibbonButton label="实际大小" :icon="FullScreen" @click="store.setScale(1)" />
+        </RibbonGroup>
+        <RibbonSep />
+        <RibbonGroup label="页面适应">
+          <RibbonButton label="适应宽度" :icon="Expand" disabled tooltip="即将推出" @click="comingSoon" />
+          <RibbonButton label="适应页面" :icon="Crop" disabled tooltip="即将推出" @click="comingSoon" />
+          <RibbonButton label="单页" :icon="Document" active />
+          <RibbonButton label="连续页" :icon="Reading" disabled tooltip="即将推出" @click="comingSoon" />
+        </RibbonGroup>
+        <RibbonSep />
+        <RibbonGroup label="旋转">
+          <RibbonButton label="顺时针" :icon="RefreshRight" disabled tooltip="即将推出" @click="comingSoon" />
+          <RibbonButton label="逆时针" :icon="RefreshLeft" disabled tooltip="即将推出" @click="comingSoon" />
+        </RibbonGroup>
+      </template>
 
-      <!-- 缩放 -->
-      <el-button-group>
-        <el-button :icon="ZoomOut" @click="store.setScale(store.scale - 0.25)" />
-        <el-button style="width:70px;cursor:default">{{ Math.round(store.scale * 100) }}%</el-button>
-        <el-button :icon="ZoomIn"  @click="store.setScale(store.scale + 0.25)" />
-      </el-button-group>
+      <!-- ===== 编辑 ===== -->
+      <template v-else-if="activeTab === 'edit'">
+        <RibbonGroup label="对象">
+          <RibbonButton label="选择" :icon="Pointer" :active="store.currentTool === 'SELECT'" @click="store.setTool('SELECT')" />
+          <RibbonButton label="重置元素" :icon="RefreshLeft" :disabled="!store.selectedElement?.isDirty" @click="handleResetElement" />
+        </RibbonGroup>
+        <RibbonSep />
+        <RibbonGroup label="页面结构">
+          <RibbonButton label="插入页面" :icon="Plus" :disabled="!store.document" @click="handleInsertPage" />
+          <RibbonButton label="删除页面" :icon="Delete" :disabled="!store.document || (store.document?.pageCount ?? 0) <= 1" @click="handleDeletePage" />
+          <RibbonButton label="复制页面" :icon="CopyDocument" disabled tooltip="即将推出" @click="comingSoon" />
+          <RibbonButton label="重排页面" :icon="Sort" disabled tooltip="即将推出" @click="comingSoon" />
+        </RibbonGroup>
+        <RibbonSep />
+        <RibbonGroup label="高级">
+          <RibbonButton label="图像替换" :icon="Picture" disabled tooltip="即将推出" @click="comingSoon" />
+          <RibbonButton label="路径编辑" :icon="EditPen" disabled tooltip="即将推出" @click="comingSoon" />
+        </RibbonGroup>
+      </template>
 
-      <el-divider direction="vertical" />
+      <!-- ===== 转换 ===== -->
+      <template v-else-if="activeTab === 'convert'">
+        <RibbonGroup label="格式转换">
+          <RibbonButton label="PDF转OFD" :icon="Upload" @click="pdfInputRef?.click()" />
+          <RibbonButton label="OFD转PDF" :icon="Download" :disabled="!store.document" @click="handleExportPdf" />
+          <RibbonButton label="批量转换" :icon="Files" disabled tooltip="即将推出" @click="comingSoon" />
+        </RibbonGroup>
+        <RibbonSep />
+        <RibbonGroup label="导出">
+          <RibbonButton label="导出图片" :icon="PictureFilled" disabled tooltip="即将推出" @click="comingSoon" />
+        </RibbonGroup>
+      </template>
 
-      <!-- 重置元素 -->
-      <el-button :icon="RefreshLeft" :disabled="!store.selectedElement?.isDirty" @click="handleResetElement">
-        重置元素
-      </el-button>
+      <!-- ===== 保护 ===== -->
+      <template v-else-if="activeTab === 'protect'">
+        <RibbonGroup label="安全">
+          <RibbonButton label="加密" :icon="Lock" disabled tooltip="即将推出" @click="comingSoon" />
+          <RibbonButton label="权限设置" :icon="Key" disabled tooltip="即将推出" @click="comingSoon" />
+          <RibbonButton label="数字签名" :icon="Stamp" disabled tooltip="即将推出" @click="comingSoon" />
+          <RibbonButton label="国密签章" :icon="Medal" disabled tooltip="即将推出" @click="comingSoon" />
+        </RibbonGroup>
+      </template>
 
-      <el-divider direction="vertical" />
+      <!-- ===== 帮助 ===== -->
+      <template v-else-if="activeTab === 'help'">
+        <RibbonGroup label="帮助">
+          <RibbonButton label="使用说明" :icon="QuestionFilled" @click="showHelp" />
+          <RibbonButton label="关于" :icon="InfoFilled" @click="showAbout" />
+        </RibbonGroup>
+      </template>
 
-      <!-- 页面操作 -->
-      <el-button-group>
-        <el-button :icon="Plus" @click="handleInsertPage">插入页面</el-button>
-        <el-button :icon="Delete" type="danger" plain
-                   :disabled="!store.document || store.document.pageCount <= 1"
-                   @click="handleDeletePage">
-          删除页面
-        </el-button>
-      </el-button-group>
-    </div>
-
-    <!-- ── 第二行：注释工具 ── -->
-    <div class="toolbar toolbar-row2">
-
-      <!-- SELECT -->
-      <el-tooltip content="选择模式（退出注释）" placement="bottom">
-        <el-button
-            :type="store.currentTool === 'SELECT' ? 'primary' : 'default'"
-            :icon="Pointer"
-            @click="store.setTool('SELECT')"
-        >选择</el-button>
-      </el-tooltip>
-
-      <el-divider direction="vertical" />
-
-      <!-- 文字标注组 -->
-      <span class="group-label">文字标注</span>
-
-      <el-tooltip content="高亮" placement="bottom">
-        <el-button
-            :class="{ 'is-active-tool': store.currentTool === 'HIGHLIGHT' }"
-            @click="store.setTool('HIGHLIGHT')"
-        >
-          <span class="btn-icon highlight-icon">高亮</span>
-        </el-button>
-      </el-tooltip>
-
-      <el-tooltip content="下划线" placement="bottom">
-        <el-button
-            :class="{ 'is-active-tool': store.currentTool === 'UNDERLINE' }"
-            @click="store.setTool('UNDERLINE')"
-        >
-          <span class="btn-icon underline-icon">下划线</span>
-        </el-button>
-      </el-tooltip>
-
-      <el-tooltip content="删除线" placement="bottom">
-        <el-button
-            :class="{ 'is-active-tool': store.currentTool === 'STRIKEOUT' }"
-            @click="store.setTool('STRIKEOUT')"
-        >
-          <span class="btn-icon strikeout-icon">删除线</span>
-        </el-button>
-      </el-tooltip>
-
-      <el-divider direction="vertical" />
-
-      <!-- 图形标注组 -->
-      <span class="group-label">图形</span>
-
-      <el-tooltip content="矩形" placement="bottom">
-        <el-button
-            :class="{ 'is-active-tool': store.currentTool === 'RECTANGLE' }"
-            :icon="ScaleToOriginal"
-            @click="store.setTool('RECTANGLE')"
-        >矩形</el-button>
-      </el-tooltip>
-
-      <el-tooltip content="椭圆" placement="bottom">
-        <el-button
-            :class="{ 'is-active-tool': store.currentTool === 'CIRCLE' }"
-            @click="store.setTool('CIRCLE')"
-        >
-          <span class="btn-icon">椭圆</span>
-        </el-button>
-      </el-tooltip>
-
-      <el-tooltip content="箭头" placement="bottom">
-        <el-button
-            :class="{ 'is-active-tool': store.currentTool === 'ARROW' }"
-            :icon="Right"
-            @click="store.setTool('ARROW')"
-        >箭头</el-button>
-      </el-tooltip>
-
-      <el-tooltip content="手绘" placement="bottom">
-        <el-button
-            :class="{ 'is-active-tool': store.currentTool === 'FREEHAND' }"
-            :icon="Edit"
-            @click="store.setTool('FREEHAND')"
-        >手绘</el-button>
-      </el-tooltip>
-
-      <el-divider direction="vertical" />
-
-      <!-- 文本注释组 -->
-      <span class="group-label">文本</span>
-
-      <el-tooltip content="文本框" placement="bottom">
-        <el-button
-            :class="{ 'is-active-tool': store.currentTool === 'TEXTBOX' }"
-            :icon="ChatLineSquare"
-            @click="store.setTool('TEXTBOX')"
-        >文本框</el-button>
-      </el-tooltip>
-
-      <el-tooltip content="便利贴" placement="bottom">
-        <el-button
-            :class="{ 'is-active-tool': store.currentTool === 'STICKYNOTE' }"
-            :icon="Memo"
-            @click="store.setTool('STICKYNOTE')"
-        >便利贴</el-button>
-      </el-tooltip>
-
-      <el-divider direction="vertical" />
-
-      <!-- 样式设置 -->
-      <span class="group-label">样式</span>
-
-      <el-tooltip content="注释颜色" placement="bottom">
-        <div class="inline-item">
-          <span class="item-label">颜色</span>
-          <el-color-picker
-              v-model="annotationColor"
-              size="small"
-              :predefine="predefineColors"
-          />
+      <!-- 占位 / 未开放标签 -->
+      <template v-else>
+        <div class="ribbon-placeholder">
+          <el-icon><Clock /></el-icon>
+          <span>「{{ currentTabLabel }}」功能即将推出</span>
         </div>
-      </el-tooltip>
-
-      <el-tooltip content="线条粗细" placement="bottom">
-        <div class="inline-item">
-          <span class="item-label">线宽</span>
-          <el-select v-model="annotationLineWidth" size="small" style="width:80px">
-            <el-option :value="1" label="细 1" />
-            <el-option :value="2" label="中 2" />
-            <el-option :value="3" label="粗 3" />
-            <el-option :value="5" label="特粗 5" />
-          </el-select>
-        </div>
-      </el-tooltip>
-
-      <el-tooltip content="透明度" placement="bottom">
-        <div class="inline-item">
-          <span class="item-label">透明度</span>
-          <el-select v-model="annotationOpacity" size="small" style="width:76px">
-            <el-option :value="0.2" label="20%" />
-            <el-option :value="0.4" label="40%" />
-            <el-option :value="0.6" label="60%" />
-            <el-option :value="0.8" label="80%" />
-            <el-option :value="1.0" label="100%" />
-          </el-select>
-        </div>
-      </el-tooltip>
-
-      <el-divider direction="vertical" />
-
-      <!-- 删除选中注释 -->
-      <el-tooltip content="删除选中注释" placement="bottom">
-        <el-button
-            type="danger" plain :icon="Delete"
-            :disabled="!store.selectedAnnotationId"
-            @click="handleDeleteAnnotation"
-        >删除注释</el-button>
-      </el-tooltip>
-
+      </template>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, h, defineComponent } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Upload, Download, RefreshLeft, RefreshRight,
-  ZoomIn, ZoomOut, Plus, Delete,
-  Edit, Right, ScaleToOriginal,
-  ChatLineSquare, Memo, Pointer,
+  ZoomIn, ZoomOut, Plus, Delete, EditPen, Right,
+  ScaleToOriginal, ChatLineSquare, Memo, Pointer,
+  Printer, FolderOpened, DocumentChecked, CopyDocument,
+  InfoFilled, Rank, FullScreen, View, Expand, Crop,
+  Document, Reading, Sort, Picture, Files, PictureFilled,
+  Lock, Key, Stamp, Medal, QuestionFilled, Clock,
 } from '@element-plus/icons-vue'
 import { useEditorStore } from '@/stores/editorStore'
 import { ofdApi, downloadBlob, promptDownloadBlob } from '@/api/ofdApi'
+import RibbonButton from '@/components/RibbonButton.vue'
 
-const store       = useEditorStore()
+const store = useEditorStore()
 const ofdInputRef = ref<HTMLInputElement>()
 const pdfInputRef = ref<HTMLInputElement>()
+const activeTab = ref('home')
 
-// ── 注释样式（双向绑定 store）──
+const tabs = [
+  { id: 'file', label: '文件', disabled: false },
+  { id: 'home', label: '主页', disabled: false },
+  { id: 'comment', label: '注释', disabled: false },
+  { id: 'view', label: '视图', disabled: false },
+  { id: 'edit', label: '编辑', disabled: false },
+  { id: 'convert', label: '转换', disabled: false },
+  { id: 'form', label: '表单', disabled: true },
+  { id: 'protect', label: '保护', disabled: false },
+  { id: 'share', label: '共享', disabled: true },
+  { id: 'cloud', label: '云服务', disabled: true },
+  { id: 'help', label: '帮助', disabled: false },
+]
+
+const currentTabLabel = computed(() => tabs.find(t => t.id === activeTab.value)?.label ?? '')
+
+function switchTab(tab: typeof tabs[0]) {
+  if (tab.disabled) {
+    ElMessage.info(`「${tab.label}」功能即将推出`)
+    return
+  }
+  activeTab.value = tab.id
+}
+
+function comingSoon() {
+  ElMessage.info('该功能即将推出，敬请期待')
+}
+
+function showHelp() {
+  ElMessageBox.alert(
+      '1. 「文件」打开 OFD 或导入 PDF\n' +
+      '2. 「主页」选择工具并编辑页面元素\n' +
+      '3. 「注释」添加高亮、图形等批注\n' +
+      '4. 「转换」导出 PDF；「文件 → 打印」输出纸质或 PDF',
+      '快速上手',
+      { confirmButtonText: '知道了' }
+  )
+}
+
+function showAbout() {
+  ElMessageBox.alert(
+      'OFD Studio v1.0\n开放版式文档（OFD）编辑器\n\n支持：解析 · 编辑 · 批注 · PDF 双向转换 · 打印',
+      '关于 OFD Studio',
+      { confirmButtonText: '确定' }
+  )
+}
+
+// Ribbon 子组件（轻量内联）
+const RibbonGroup = defineComponent({
+  name: 'RibbonGroup',
+  props: { label: { type: String, required: true } },
+  setup(props, { slots }) {
+    return () => h('div', { class: 'ribbon-group' }, [
+      h('div', { class: 'ribbon-group-items' }, slots.default?.()),
+      h('span', { class: 'ribbon-group-label' }, props.label),
+    ])
+  },
+})
+
+const RibbonSep = defineComponent({
+  name: 'RibbonSep',
+  setup() {
+    return () => h('div', { class: 'ribbon-sep' })
+  },
+})
+
 const annotationColor = computed({
   get: () => store.annotationColor,
   set: (v: string) => store.setAnnotationColor(v),
@@ -243,12 +325,10 @@ const annotationOpacity = computed({
 })
 
 const predefineColors = [
-  '#FFFF00', '#FF6B6B', '#51CF66',
-  '#339AF0', '#FF922B', '#CC5DE8',
-  '#000000', '#FFFFFF',
+  '#FFFF00', '#FF6B6B', '#51CF66', '#339AF0',
+  '#FF922B', '#CC5DE8', '#000000', '#FFFFFF',
 ]
 
-// ── 删除注释 ──
 async function handleDeleteAnnotation() {
   if (!store.selectedAnnotationId) return
   try {
@@ -258,7 +338,6 @@ async function handleDeleteAnnotation() {
   } catch { /* 取消 */ }
 }
 
-// ── 文件操作 ──
 async function handleOfdUpload(e: Event) {
   const file = (e.target as HTMLInputElement).files?.[0]
   if (!file) return
@@ -282,9 +361,9 @@ async function handlePdfImport(e: Event) {
   if (!file) return
   store.setLoading(true, '正在转换PDF...')
   try {
-    const blob    = await ofdApi.fromPdf(file)
+    const blob = await ofdApi.fromPdf(file)
     const ofdFile = new File([blob], file.name.replace('.pdf', '.ofd'))
-    const doc     = await ofdApi.parseOfd(ofdFile)
+    const doc = await ofdApi.parseOfd(ofdFile)
     store.setDocument(doc)
     store.setCurrentFile(ofdFile)
     await store.loadAllAnnotations()
@@ -318,11 +397,7 @@ async function handleExportPdf() {
     const blob = await ofdApi.toPdf(store.currentFile)
     const filename = `${store.document?.title ?? 'export'}.pdf`
     const saved = await promptDownloadBlob(blob, filename)
-    if (saved) {
-      ElMessage.success('PDF 已开始下载，请在浏览器下载栏或「下载」文件夹中查看')
-    } else {
-      ElMessage.info('已取消下载；可再次点击「导出PDF」重新生成')
-    }
+    if (saved) ElMessage.success('PDF 已开始下载')
   } catch (err: any) {
     ElMessage.error(err.message || '导出失败')
   } finally {
@@ -343,9 +418,7 @@ function handleInsertPage() {
 
 async function handleDeletePage() {
   try {
-    await ElMessageBox.confirm(
-        `确定删除第${store.currentPageIndex + 1}页吗？`, '确认删除', { type: 'warning' }
-    )
+    await ElMessageBox.confirm(`确定删除第${store.currentPageIndex + 1}页吗？`, '确认删除', { type: 'warning' })
     store.deletePage(store.currentPageIndex)
     ElMessage.success('页面已删除')
   } catch { /* 取消 */ }
@@ -353,80 +426,178 @@ async function handleDeletePage() {
 </script>
 
 <style scoped>
-/* 外层容器：两行堆叠 */
-.toolbar-wrapper {
-  display: flex;
-  flex-direction: column;
-  border-bottom: 1px solid #e4e7ed;
-  background: #f5f7fa;
-  flex-shrink: 0;          /* 不被 flex 压缩 */
+.ribbon-shell {
+  flex-shrink: 0;
+  background: var(--ribbon-bg);
+  border-bottom: 1px solid var(--line);
+  z-index: 10;
 }
 
-/* 每行公共样式 */
-.toolbar {
+/* ---- 标签栏 ---- */
+.ribbon-tabs {
+  display: flex;
+  align-items: stretch;
+  height: 36px;
+  padding: 0 8px 0 0;
+  background: var(--ribbon-tab-bar-bg);
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+}
+.ribbon-tabs::-webkit-scrollbar { height: 4px; }
+
+.ribbon-brand {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 16px;
-  flex-wrap: nowrap;       /* 不换行，保证在同一行 */
-  overflow-x: auto;        /* 真的太窄时允许横向滚动 */
+  gap: 8px;
+  padding: 0 16px 0 12px;
+  margin-right: 4px;
+  flex-shrink: 0;
 }
-
-/* 第一行底部分隔线 */
-.toolbar-row1 {
-  border-bottom: 1px solid #ececec;
+.brand-icon {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  background: linear-gradient(145deg, var(--ribbon-accent), var(--ribbon-accent-dark));
+  color: #fff;
+  font-size: 10px;
+  font-weight: 800;
 }
-
-/* 第二行注释工具栏底色稍深以区分 */
-.toolbar-row2 {
-  background: #eef2f8;
-}
-
-/* 分组标签 */
-.group-label {
-  font-size: 11px;
-  color: #909399;
+.brand-name {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-1);
   white-space: nowrap;
-  padding: 0 2px;
-  user-select: none;
 }
 
-/* 当前激活的注释工具按钮 */
-.is-active-tool {
-  background-color: #409eff !important;
-  color: #ffffff !important;
-  border-color: #409eff !important;
+.ribbon-tab {
+  padding: 0 14px;
+  border: none;
+  background: transparent;
+  font-size: 13px;
+  color: var(--text-2);
+  cursor: pointer;
+  white-space: nowrap;
+  border-radius: 4px 4px 0 0;
+  margin-top: 4px;
+  transition: background .12s, color .12s;
 }
-
-/* 按钮内文字图标 */
-.btn-icon {
-  font-size: 12px;
+.ribbon-tab:hover:not(.disabled):not(.active) {
+  background: rgba(0, 0, 0, .04);
+  color: var(--text-1);
+}
+.ribbon-tab.active {
+  background: var(--ribbon-accent);
+  color: #fff;
   font-weight: 600;
 }
-.highlight-icon {
-  background: #ffff00;
-  color: #333;
-  padding: 0 2px;
-  border-radius: 2px;
-}
-.underline-icon {
-  color: #409eff;
-  text-decoration: underline;
-}
-.strikeout-icon {
-  color: #f56c6c;
-  text-decoration: line-through;
+.ribbon-tab.disabled {
+  opacity: .45;
+  cursor: not-allowed;
 }
 
-/* 颜色/线宽/透明度内联项 */
-.inline-item {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-.item-label {
+.ribbon-tabs-spacer { flex: 1; min-width: 12px; }
+.ribbon-doc-title {
+  align-self: center;
+  max-width: 280px;
+  padding: 0 12px;
   font-size: 12px;
-  color: #606266;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ---- Ribbon 面板 ---- */
+.ribbon-panel {
+  display: flex;
+  align-items: stretch;
+  min-height: 88px;
+  padding: 6px 12px 4px;
+  overflow-x: auto;
+  background: var(--ribbon-panel-bg);
+}
+.ribbon-panel::-webkit-scrollbar { height: 6px; }
+
+:deep(.ribbon-group) {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0 6px;
+  flex-shrink: 0;
+}
+:deep(.ribbon-group-items) {
+  display: flex;
+  align-items: flex-start;
+  gap: 2px;
+  flex: 1;
+  padding-bottom: 2px;
+}
+:deep(.ribbon-group-label) {
+  font-size: 10px;
+  color: var(--text-3);
+  text-align: center;
+  padding: 2px 0 0;
+  white-space: nowrap;
+}
+
+:deep(.ribbon-sep) {
+  width: 1px;
+  align-self: stretch;
+  margin: 4px 6px;
+  background: var(--line-strong);
+  flex-shrink: 0;
+}
+
+.ribbon-scale-display {
+  min-width: 52px;
+  height: 62px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-1);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.ribbon-scale-display:hover {
+  border-color: var(--ribbon-accent);
+  color: var(--ribbon-accent);
+}
+
+.ribbon-style-row {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 6px;
+  min-width: 72px;
+}
+.style-label { font-size: 10px; color: var(--text-3); }
+
+.mark-icon, .shape-icon {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  font-size: 14px;
+  font-weight: 700;
+  border-radius: 3px;
+}
+.mark-icon.highlight { background: #ffe566; color: #333; }
+.mark-icon.underline { color: var(--ribbon-accent); text-decoration: underline; }
+.mark-icon.strike { color: #e74c3c; text-decoration: line-through; }
+.shape-icon.oval { font-size: 18px; color: var(--text-2); }
+
+.ribbon-placeholder {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 24px 32px;
+  color: var(--text-3);
+  font-size: 14px;
+}
+.ribbon-placeholder .el-icon { font-size: 22px; }
 </style>

@@ -18,6 +18,9 @@ export const useEditorStore = defineStore('editor', () => {
     const currentFile = ref<File | null>(null)
     const fileId = ref<string | null>(null)
 
+    // 打印对话框可见性（跨组件协调：Toolbar 打开、App 编排打印）
+    const printDialogVisible = ref(false)
+
     const history = ref<DocumentData[]>([])
     const historyIndex = ref(-1)
     /**
@@ -413,6 +416,7 @@ export const useEditorStore = defineStore('editor', () => {
         document, currentPageIndex, selectedElementId,
         scale, isLoading, loadingText, currentFile,
         history, historyIndex, fileId, renderVersion,
+        printDialogVisible,
         // ── 注释状态 ──
         currentTool, annotationsMap, selectedAnnotationId,
         annotationColor, annotationOpacity, annotationLineWidth,

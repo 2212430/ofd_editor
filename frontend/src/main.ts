@@ -5,6 +5,7 @@ import 'element-plus/dist/index.css'
 import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 import VueKonva from 'vue-konva'
 import App from './App.vue'
+import './styles/theme.css'
 
 const app = createApp(App)
 
