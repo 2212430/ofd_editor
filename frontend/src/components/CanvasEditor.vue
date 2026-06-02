@@ -1,7 +1,12 @@
 <template>
   <div
+      ref="wrapperRef"
       class="canvas-wrapper"
-      :class="{ 'cursor-crosshair': store.isAnnotationTool }"
+      :class="{
+        'cursor-crosshair': store.isAnnotationTool,
+        'cursor-hand': store.isHandTool,
+        'cursor-grabbing': store.isHandTool && isPanning,
+      }"
   >
     <v-stage
         ref="stageRef"
@@ -81,7 +86,7 @@
         </template>
 
         <v-transformer
-            v-if="!store.isAnnotationTool"
+            v-if="store.isSelectTool"
             ref="transformerRef"
             :config="transformerConfig"
         />
@@ -234,7 +239,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useEditorStore } from '@/stores/editorStore'
 import type { PageData, ElementData, AnnotationData } from '@/types'
@@ -249,6 +254,7 @@ const store = useEditorStore()
 // Konva 引用
 // ─────────────────────────────────────────────
 const stageRef                 = ref()
+const wrapperRef               = ref<HTMLElement>()
 const transformerRef           = ref()
 const annotationLayerRef       = ref()
 const annotationTransformerRef = ref()
@@ -656,9 +662,58 @@ function getStagePos(): { x: number; y: number } | null {
 }
 
 // ─────────────────────────────────────────────
+// 手型工具：拖拽平移编辑区滚动条
+// ─────────────────────────────────────────────
+const isPanning = ref(false)
+const suppressClick = ref(false)
+const panStart = { clientX: 0, clientY: 0, scrollLeft: 0, scrollTop: 0, moved: false }
+
+function getScrollContainer(): HTMLElement | null {
+  return wrapperRef.value?.closest('.editor-area') as HTMLElement | null
+}
+
+function onPanMove(e: MouseEvent) {
+  if (!isPanning.value) return
+  const sc = getScrollContainer()
+  if (!sc) return
+  const dx = e.clientX - panStart.clientX
+  const dy = e.clientY - panStart.clientY
+  if (Math.abs(dx) > 2 || Math.abs(dy) > 2) panStart.moved = true
+  sc.scrollLeft = panStart.scrollLeft - dx
+  sc.scrollTop = panStart.scrollTop - dy
+}
+
+function onPanEnd() {
+  window.removeEventListener('mousemove', onPanMove)
+  window.removeEventListener('mouseup', onPanEnd)
+  if (isPanning.value && panStart.moved) suppressClick.value = true
+  isPanning.value = false
+}
+
+onUnmounted(() => {
+  window.removeEventListener('mousemove', onPanMove)
+  window.removeEventListener('mouseup', onPanEnd)
+})
+
+// ─────────────────────────────────────────────
 // 鼠标事件
 // ─────────────────────────────────────────────
 function handleMouseDown(e: any) {
+  if (store.isHandTool) {
+    if (e.evt?.button !== 0) return
+    const sc = getScrollContainer()
+    if (!sc) return
+    isPanning.value = true
+    panStart.clientX = e.evt.clientX
+    panStart.clientY = e.evt.clientY
+    panStart.scrollLeft = sc.scrollLeft
+    panStart.scrollTop = sc.scrollTop
+    panStart.moved = false
+    e.evt.preventDefault()
+    window.addEventListener('mousemove', onPanMove)
+    window.addEventListener('mouseup', onPanEnd)
+    return
+  }
   if (!store.isAnnotationTool) return
   if (e.evt?.button !== 0) return
   if (['STAMP', 'TEXTBOX', 'STICKYNOTE'].includes(store.currentTool)) return
@@ -703,6 +758,12 @@ function handleMouseLeave() {
 }
 
 function handleStageClick(e: any) {
+  if (suppressClick.value) {
+    suppressClick.value = false
+    return
+  }
+  if (store.isHandTool) return
+
   const name         = typeof e.target?.name === 'function' ? e.target.name() : ''
   const isBackground = e.target === e.target.getStage() || name === 'page-bg'
   if (!store.isAnnotationTool) {
@@ -785,7 +846,8 @@ function loadImageDimensions(src: string): Promise<{ width: number; height: numb
 }
 
 function handleElementClick(e: any, elementId: string) {
-  if (store.isAnnotationTool) return
+  if (suppressClick.value) return
+  if (!store.isSelectTool) return
   const el = props.page.elements.find(item => item.id === elementId)
   if (el?.type === 'SEAL') return
   e.cancelBubble = true
@@ -794,6 +856,7 @@ function handleElementClick(e: any, elementId: string) {
 
 function handleAnnotationClick(e: any, id: string) {
   e.cancelBubble = true
+  if (suppressClick.value) return
   if (store.currentTool === 'SELECT') store.selectAnnotation(id)
 }
 
@@ -1164,7 +1227,7 @@ function getCurrencyGroupConfig(element: ElementData) {
     x:         s(element.x),
     y:         s(element.y),
     rotation:  element.rotation ?? 0,
-    draggable: !store.isAnnotationTool,
+    draggable: elementDraggable(),
     stroke:    isSelected ? '#1a73e8' : undefined,
     strokeWidth: isSelected ? 0.5 : 0,
   }
@@ -1279,7 +1342,7 @@ function getTextConfig(element: ElementData) {
     x:              s(element.x),
     y:              s(element.y),
     rotation:       element.rotation ?? 0,
-    draggable:      !store.isAnnotationTool,
+    draggable:      elementDraggable(),
     text:           displayText,
     fontSize:       fsPx,
     letterSpacing,
@@ -1322,7 +1385,7 @@ function getPathConfig(element: ElementData) {
     x:                  0, y: 0,
     scaleX:             sc, scaleY: sc,
     rotation:           element.rotation ?? 0,
-    draggable:          !store.isAnnotationTool,
+    draggable:          elementDraggable(),
     data:               getPathData(element),
     fill:               fillOff ? 'transparent' : (e.fillColor ?? 'transparent'),
     stroke:             strokeCol,
@@ -1369,7 +1432,7 @@ function getImageConfig(element: ElementData) {
     rotation:    element.rotation ?? 0,
     scaleX:      element.scaleX ?? 1,
     scaleY:      element.scaleY ?? 1,
-    draggable:   !store.isAnnotationTool,
+    draggable:   elementDraggable(),
     image:       imageMap[element.id],
     stroke:      isSelected ? '#1a73e8' : undefined,
     strokeWidth: isSelected ? 1 : 0,
@@ -1381,7 +1444,7 @@ function getImagePlaceholderConfig(element: ElementData) {
     id: element.id, x: s(element.x), y: s(element.y),
     width: s(element.width), height: s(element.height),
     fill: 'rgba(120,120,120,0.08)', stroke: 'rgba(120,120,120,0.35)',
-    strokeWidth: 1, draggable: !store.isAnnotationTool,
+    strokeWidth: 1, draggable: elementDraggable(),
   }
 }
 
@@ -1390,7 +1453,7 @@ function getImageFailedConfig(element: ElementData) {
     id: element.id, x: s(element.x), y: s(element.y),
     width: s(element.width), height: s(element.height),
     fill: 'rgba(255,77,79,0.12)', stroke: '#ff4d4f',
-    strokeWidth: 1, draggable: !store.isAnnotationTool,
+    strokeWidth: 1, draggable: elementDraggable(),
   }
 }
 
@@ -1399,7 +1462,7 @@ function getImageNoSrcPlaceholderConfig(element: ElementData) {
     id: element.id, x: s(element.x), y: s(element.y),
     width: s(element.width), height: s(element.height),
     fill: 'rgba(255,0,0,0.05)', stroke: '#ffaaaa',
-    strokeWidth: 1, draggable: !store.isAnnotationTool,
+    strokeWidth: 1, draggable: elementDraggable(),
   }
 }
 
@@ -1411,13 +1474,15 @@ function getFallbackConfig(element: ElementData) {
     fill: 'transparent',
     stroke: isSelected ? '#1a73e8' : 'transparent',
     strokeWidth: isSelected ? 1 : 0,
-    draggable: !store.isAnnotationTool,
+    draggable: elementDraggable(),
   }
 }
 
 // ─────────────────────────────────────────────
 // 注释 Config
 // ─────────────────────────────────────────────
+function elementDraggable() { return store.isSelectTool }
+
 function annDraggable() { return store.currentTool === 'SELECT' }
 
 function getAnnotationGroupConfig(ann: AnnotationData) {
@@ -1687,3 +1752,17 @@ async function captureForPrint(
 
 defineExpose({ captureForPrint })
 </script>
+
+<style scoped>
+.canvas-wrapper.cursor-hand {
+  cursor: grab;
+}
+
+.canvas-wrapper.cursor-hand.cursor-grabbing {
+  cursor: grabbing;
+}
+
+.canvas-wrapper.cursor-crosshair {
+  cursor: crosshair;
+}
+</style>

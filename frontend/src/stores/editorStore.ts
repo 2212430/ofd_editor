@@ -1,5 +1,5 @@
 import { defineStore, acceptHMRUpdate } from 'pinia'
-import { ref, computed, reactive } from 'vue'
+import { ref, computed, reactive, nextTick } from 'vue'
 import type {
     DocumentData, ElementData, PageData,
     AnnotationData, AnnotationType, ToolType
@@ -43,6 +43,11 @@ export const useEditorStore = defineStore('editor', () => {
     /** 待放置的图章图片（data URL），选择图片后点击页面放置 */
     const pendingStampImage = ref<string | null>(null)
 
+    /** 左侧页面列表缩略图（pageIndex → PNG dataURL），打开文档时生成，编辑后不自动刷新 */
+    const pageThumbnails = reactive<Record<number, string>>({})
+    const isGeneratingThumbnails = ref(false)
+    let thumbnailGenerationHook: (() => Promise<void>) | null = null
+
     // ==================== 计算属性 ====================
     const currentPage = computed<PageData | null>(() =>
         document.value?.pages[currentPageIndex.value] ?? null
@@ -73,7 +78,11 @@ export const useEditorStore = defineStore('editor', () => {
         return null
     })
 
-    const isAnnotationTool = computed(() => currentTool.value !== 'SELECT')
+    const isHandTool = computed(() => currentTool.value === 'HAND')
+    const isSelectTool = computed(() => currentTool.value === 'SELECT')
+    const isAnnotationTool = computed(() =>
+        currentTool.value !== 'SELECT' && currentTool.value !== 'HAND'
+    )
 
     const hasPendingStamp = computed(() => !!pendingStampImage.value)
 
@@ -249,7 +258,35 @@ export const useEditorStore = defineStore('editor', () => {
         selectedElementId.value = null
         selectedAnnotationId.value = null
         pendingStampImage.value = null
+        clearPageThumbnails()
         saveToHistory()
+        void nextTick(() => { fitToWidth() })
+    }
+
+    function clearPageThumbnails() {
+        for (const key of Object.keys(pageThumbnails)) {
+            delete pageThumbnails[Number(key)]
+        }
+    }
+
+    function setPageThumbnail(pageIndex: number, dataUrl: string) {
+        pageThumbnails[pageIndex] = dataUrl
+    }
+
+    function registerThumbnailGenerationHook(hook: () => Promise<void>) {
+        thumbnailGenerationHook = hook
+    }
+
+    async function generatePageThumbnails() {
+        if (!document.value || isGeneratingThumbnails.value || !thumbnailGenerationHook) return
+        isGeneratingThumbnails.value = true
+        try {
+            await thumbnailGenerationHook()
+        } catch (e) {
+            console.warn('[editorStore] 缩略图生成失败:', e)
+        } finally {
+            isGeneratingThumbnails.value = false
+        }
     }
 
     function setCurrentFile(file: File | null) {
@@ -271,6 +308,61 @@ export const useEditorStore = defineStore('editor', () => {
 
     function setScale(val: number) {
         scale.value = Math.max(0.25, Math.min(3, val))
+    }
+
+    /** 与 App.vue `.editor-area` 的四边 padding 之和（各 24px，取宽/高方向合计 48） */
+    const EDITOR_AREA_PADDING = 48
+
+    let editorAreaResolver: (() => HTMLElement | null) | null = null
+
+    function registerEditorAreaResolver(resolver: () => HTMLElement | null) {
+        editorAreaResolver = resolver
+    }
+
+    function getFitViewport(): { page: PageData; area: HTMLElement } | null {
+        const page = currentPage.value
+        const area = editorAreaResolver?.()
+        if (!page || !area) return null
+        return { page, area }
+    }
+
+    /**
+     * 适应宽度：按当前页宽度缩放，使画布横向铺满编辑区且不出现水平滚动条。
+     */
+    function fitToWidth(): boolean {
+        const ctx = getFitViewport()
+        if (!ctx) return false
+
+        const baseWidthPx = ctx.page.width * MM_TO_PX
+        if (baseWidthPx <= 0) return false
+
+        const availableW = ctx.area.clientWidth - EDITOR_AREA_PADDING - 2
+        if (availableW <= 0) return false
+
+        setScale(availableW / baseWidthPx)
+        ctx.area.scrollLeft = 0
+        return true
+    }
+
+    /**
+     * 适应页面：按当前页宽高缩放，使整页可见且不出现横向/纵向滚动条。
+     */
+    function fitToPage(): boolean {
+        const ctx = getFitViewport()
+        if (!ctx) return false
+
+        const baseWidthPx = ctx.page.width * MM_TO_PX
+        const baseHeightPx = ctx.page.height * MM_TO_PX
+        if (baseWidthPx <= 0 || baseHeightPx <= 0) return false
+
+        const availableW = ctx.area.clientWidth - EDITOR_AREA_PADDING - 2
+        const availableH = ctx.area.clientHeight - EDITOR_AREA_PADDING - 2
+        if (availableW <= 0 || availableH <= 0) return false
+
+        setScale(Math.min(availableW / baseWidthPx, availableH / baseHeightPx))
+        ctx.area.scrollLeft = 0
+        ctx.area.scrollTop = 0
+        return true
     }
 
     function setLoading(val: boolean, text = '处理中...') {
@@ -685,8 +777,8 @@ export const useEditorStore = defineStore('editor', () => {
     }
 
     async function loadAllAnnotations(): Promise<void> {
-        if (!fileId.value) return
         try {
+            if (!fileId.value) return
             const all = await ofdApi.getAllAnnotations(fileId.value)
             // ✅ 清空后重新赋值
             for (const key of Object.keys(annotationsMap)) {
@@ -698,6 +790,8 @@ export const useEditorStore = defineStore('editor', () => {
             console.log('[editorStore] 注释加载完成')
         } catch (e) {
             console.warn('[editorStore] 加载注释失败（可能暂无注释）:', e)
+        } finally {
+            void generatePageThumbnails()
         }
     }
 
@@ -729,13 +823,15 @@ export const useEditorStore = defineStore('editor', () => {
         currentTool, annotationsMap, selectedAnnotationId,
         annotationColor, annotationOpacity, annotationLineWidth,
         pendingStampImage, hasPendingStamp,
+        pageThumbnails, isGeneratingThumbnails,
         // ── 原有计算属性 ──
         currentPage, selectedElement, canUndo, canRedo,
         // ── 注释计算属性 ──
-        currentPageAnnotations, selectedAnnotation, isAnnotationTool,
+        currentPageAnnotations, selectedAnnotation,
+        isHandTool, isSelectTool, isAnnotationTool,
         // ── 原有方法 ──
         setDocument, setCurrentFile, setCurrentPage,
-        selectElement, setScale, setLoading,
+        selectElement, setScale, fitToWidth, fitToPage, registerEditorAreaResolver, setLoading,
         updateElement, resetElement, importImageToPage,
         insertPage, deletePage, movePage, copyPage, reorderPages,
         saveToHistory, undo, redo, getDocumentForSave, markNewElementsPersisted,
@@ -746,6 +842,7 @@ export const useEditorStore = defineStore('editor', () => {
         addAnnotation, updateAnnotation, deleteAnnotation,
         loadAllAnnotations, getAnnotationsByPage,
         exportWithAnnotations,
+        setPageThumbnail, registerThumbnailGenerationHook, generatePageThumbnails,
     }
 })
 

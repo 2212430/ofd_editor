@@ -54,7 +54,7 @@
       <!-- ===== 主页 ===== -->
       <template v-else-if="activeTab === 'home'">
         <RibbonGroup label="工具">
-          <RibbonButton label="手型" :icon="Pointer" disabled tooltip="即将推出" @click="comingSoon" />
+          <RibbonButton label="手型" :icon="HandIcon" :active="store.currentTool === 'HAND'" @click="store.setTool('HAND')" />
           <RibbonButton label="选择" :icon="Rank" :active="store.currentTool === 'SELECT'" @click="store.setTool('SELECT')" />
         </RibbonGroup>
         <RibbonSep />
@@ -71,6 +71,8 @@
           </button>
           <RibbonButton label="放大" :icon="ZoomIn" @click="store.setScale(store.scale + 0.25)" />
           <RibbonButton label="实际大小" :icon="FullScreen" @click="store.setScale(1)" />
+          <RibbonButton label="适应宽度" :icon="Expand" :disabled="!store.document" @click="handleFitWidth" />
+          <RibbonButton label="适应页面" :icon="Crop" :disabled="!store.document" @click="handleFitPage" />
         </RibbonGroup>
         <RibbonSep />
         <RibbonGroup label="页面">
@@ -156,6 +158,11 @@
 
       <!-- ===== 视图 ===== -->
       <template v-else-if="activeTab === 'view'">
+        <RibbonGroup label="导航">
+          <RibbonButton label="手型" :icon="HandIcon" :active="store.currentTool === 'HAND'" @click="store.setTool('HAND')" />
+          <RibbonButton label="选择" :icon="Rank" :active="store.currentTool === 'SELECT'" @click="store.setTool('SELECT')" />
+        </RibbonGroup>
+        <RibbonSep />
         <RibbonGroup label="缩放">
           <RibbonButton label="放大" :icon="ZoomIn" @click="store.setScale(store.scale + 0.25)" />
           <RibbonButton label="缩小" :icon="ZoomOut" @click="store.setScale(store.scale - 0.25)" />
@@ -163,8 +170,8 @@
         </RibbonGroup>
         <RibbonSep />
         <RibbonGroup label="页面适应">
-          <RibbonButton label="适应宽度" :icon="Expand" disabled tooltip="即将推出" @click="comingSoon" />
-          <RibbonButton label="适应页面" :icon="Crop" disabled tooltip="即将推出" @click="comingSoon" />
+          <RibbonButton label="适应宽度" :icon="Expand" :disabled="!store.document" @click="handleFitWidth" />
+          <RibbonButton label="适应页面" :icon="Crop" :disabled="!store.document" @click="handleFitPage" />
           <RibbonButton label="单页" :icon="Document" active />
           <RibbonButton label="连续页" :icon="Reading" disabled tooltip="即将推出" @click="comingSoon" />
         </RibbonGroup>
@@ -257,6 +264,26 @@ import { useEditorStore } from '@/stores/editorStore'
 import { ofdApi, downloadBlob, promptDownloadBlob } from '@/api/ofdApi'
 import RibbonButton from '@/components/RibbonButton.vue'
 
+const HandIcon = defineComponent({
+  name: 'HandIcon',
+  render() {
+    return h('svg', {
+      viewBox: '0 0 24 24',
+      width: '1em',
+      height: '1em',
+      fill: 'none',
+      stroke: 'currentColor',
+      'stroke-width': '1.8',
+      'stroke-linecap': 'round',
+      'stroke-linejoin': 'round',
+    }, [
+      h('path', { d: 'M18 11V6a2 2 0 0 0-4 0v5' }),
+      h('path', { d: 'M14 10V4a2 2 0 0 0-4 0v6' }),
+      h('path', { d: 'M10 10V5a2 2 0 0 0-4 0v8a8 8 0 0 0 16 0v-5a2 2 0 0 0-4 0v2' }),
+    ])
+  },
+})
+
 const store = useEditorStore()
 const ofdInputRef = ref<HTMLInputElement>()
 const pdfInputRef = ref<HTMLInputElement>()
@@ -290,6 +317,18 @@ function switchTab(tab: typeof tabs[0]) {
 
 function comingSoon() {
   ElMessage.info('该功能即将推出，敬请期待')
+}
+
+function handleFitWidth() {
+  if (!store.fitToWidth()) {
+    ElMessage.warning('无法适应宽度，请先打开文档')
+  }
+}
+
+function handleFitPage() {
+  if (!store.fitToPage()) {
+    ElMessage.warning('无法适应页面，请先打开文档')
+  }
 }
 
 function showHelp() {

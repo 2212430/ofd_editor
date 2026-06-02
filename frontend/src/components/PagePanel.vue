@@ -4,7 +4,9 @@
       <span>页面列表</span>
       <span class="page-count">{{ store.document?.pageCount ?? 0 }} 页</span>
     </div>
-    <div v-if="store.document" class="panel-hint">拖动缩略图可调整顺序</div>
+    <div v-if="store.document" class="panel-hint">
+      {{ store.isGeneratingThumbnails ? '正在生成页面预览…' : '拖动缩略图可调整顺序' }}
+    </div>
 
     <div v-if="!store.document" class="empty-tip">暂无文档</div>
 
@@ -30,7 +32,17 @@
             class="page-thumbnail"
             :style="{ aspectRatio: `${page.width} / ${page.height}` }"
         >
-          <el-icon class="page-icon"><Document /></el-icon>
+          <img
+              v-if="store.pageThumbnails[index]"
+              :src="store.pageThumbnails[index]"
+              class="thumb-img"
+              alt=""
+              draggable="false"
+          />
+          <template v-else>
+            <el-icon class="page-icon"><Document /></el-icon>
+            <span v-if="store.isGeneratingThumbnails" class="thumb-loading">预览生成中</span>
+          </template>
           <span class="element-count">{{ page.elements.length }} 个元素</span>
           <button
               type="button"
@@ -181,7 +193,7 @@ async function handleCopyPage(index: number) {
 }
 
 .page-thumbnail {
-  background: #fff;
+  background: #f4f5f7;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -193,6 +205,23 @@ async function handleCopyPage(index: number) {
   box-shadow: var(--shadow-sm);
   overflow: hidden;
   transition: box-shadow .15s ease, border-color .15s ease;
+}
+
+.thumb-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #fff;
+  pointer-events: none;
+  user-select: none;
+}
+
+.thumb-loading {
+  font-size: 10px;
+  color: var(--text-3);
+  margin-top: 4px;
 }
 
 .page-item:hover .page-thumbnail {

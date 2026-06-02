@@ -16,6 +16,7 @@ export type AnnotationType =
 // 当前工具类型
 export type ToolType =
     | 'SELECT'       // 选择/移动
+    | 'HAND'         // 手型/浏览（平移，不可选中）
     | 'HIGHLIGHT'
     | 'UNDERLINE'
     | 'STRIKEOUT'

@@ -9,7 +9,7 @@
       <PagePanel />
 
       <!-- 中间编辑区 -->
-      <div class="editor-area">
+      <div ref="editorAreaRef" class="editor-area">
         <!-- 加载遮罩 -->
         <div v-if="store.isLoading" class="loading-mask">
           <div class="spinner"></div>
@@ -81,7 +81,7 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, ref } from 'vue'
+import { nextTick, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Upload } from '@element-plus/icons-vue'
 import { useEditorStore } from '@/stores/editorStore'
@@ -100,6 +100,42 @@ const store = useEditorStore()
 const uploadRef = ref<HTMLInputElement>()
 const pdfRef = ref<HTMLInputElement>()
 const canvasRef = ref<InstanceType<typeof CanvasEditor> | null>(null)
+const editorAreaRef = ref<HTMLElement>()
+
+/** 左侧缩略图：逐页截图（低分辨率），打开文档后后台生成 */
+const THUMBNAIL_PIXEL_RATIO = 0.22
+
+onMounted(() => {
+  store.registerEditorAreaResolver(() => editorAreaRef.value ?? null)
+
+  store.registerThumbnailGenerationHook(async () => {
+    const doc = store.document
+    if (!doc || !canvasRef.value) return
+
+    const savedScale = store.scale
+    const savedPage = store.currentPageIndex
+    store.selectElement(null)
+    store.selectAnnotation(null)
+    store.setScale(1)
+
+    try {
+      for (let i = 0; i < doc.pageCount; i++) {
+        store.setCurrentPage(i)
+        await nextTick()
+        await new Promise<void>((r) => {
+          requestAnimationFrame(() => requestAnimationFrame(() => r()))
+        })
+        const cap = await canvasRef.value.captureForPrint(THUMBNAIL_PIXEL_RATIO, true)
+        if (cap?.dataUrl) {
+          store.setPageThumbnail(i, cap.dataUrl)
+        }
+      }
+    } finally {
+      store.setScale(savedScale)
+      store.setCurrentPage(savedPage)
+    }
+  })
+})
 
 function triggerUpload() {
   uploadRef.value?.click()
@@ -115,7 +151,7 @@ async function handleWelcomeUpload(e: Event) {
   try {
     const doc = await ofdApi.parseOfd(file)
     store.setDocument(doc)
-    store.loadAllAnnotations()
+    await store.loadAllAnnotations()
     store.setCurrentFile(file)
     ElMessage.success(`解析成功：${doc.title}`)
   } catch (err: any) {
