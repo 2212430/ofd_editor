@@ -132,8 +132,8 @@ public class OfdController {
      */
     @GetMapping("/{fileId}/annotations")
     public ResponseEntity<?> getAnnotations(
-            @PathVariable String fileId,
-            @RequestParam Integer pageIndex) {
+            @PathVariable("fileId") String fileId,
+            @RequestParam("pageIndex") Integer pageIndex) {
         try {
             List<AnnotationDTO> annotations = annotationService.getAnnotations(fileId, pageIndex);
             log.info("获取注释: fileId={}, pageIndex={}, count={}", fileId, pageIndex, annotations.size());
@@ -149,7 +149,7 @@ public class OfdController {
      * GET /api/ofd/{fileId}/annotations/all
      */
     @GetMapping("/{fileId}/annotations/all")
-    public ResponseEntity<?> getAllAnnotations(@PathVariable String fileId) {
+    public ResponseEntity<?> getAllAnnotations(@PathVariable("fileId") String fileId) {
         try {
             Map<Integer, List<AnnotationDTO>> all = annotationService.getAllAnnotations(fileId);
             log.info("获取所有注释: fileId={}, 共{}页", fileId, all.size());
@@ -166,7 +166,7 @@ public class OfdController {
      */
     @PostMapping("/{fileId}/annotations")
     public ResponseEntity<?> addAnnotation(
-            @PathVariable String fileId,
+            @PathVariable("fileId") String fileId,
             @RequestBody AnnotationDTO annotation) {
         try {
             log.info("新增注释: fileId={}, type={}, pageIndex={}",
@@ -185,8 +185,8 @@ public class OfdController {
      */
     @PutMapping("/{fileId}/annotations/{annotationId}")
     public ResponseEntity<?> updateAnnotation(
-            @PathVariable String fileId,
-            @PathVariable String annotationId,
+            @PathVariable("fileId") String fileId,
+            @PathVariable("annotationId") String annotationId,
             @RequestBody AnnotationDTO annotation) {
         try {
             log.info("更新注释: fileId={}, annotationId={}", fileId, annotationId);
@@ -204,8 +204,8 @@ public class OfdController {
      */
     @DeleteMapping("/{fileId}/annotations/{annotationId}")
     public ResponseEntity<?> deleteAnnotation(
-            @PathVariable String fileId,
-            @PathVariable String annotationId) {
+            @PathVariable("fileId") String fileId,
+            @PathVariable("annotationId") String annotationId) {
         try {
             log.info("删除注释: fileId={}, annotationId={}", fileId, annotationId);
             annotationService.deleteAnnotation(fileId, annotationId);
@@ -222,8 +222,8 @@ public class OfdController {
      */
     @DeleteMapping("/{fileId}/annotations")
     public ResponseEntity<?> deleteAllAnnotations(
-            @PathVariable String fileId,
-            @RequestParam Integer pageIndex) {
+            @PathVariable("fileId") String fileId,
+            @RequestParam("pageIndex") Integer pageIndex) {
         try {
             log.info("删除整页注释: fileId={}, pageIndex={}", fileId, pageIndex);
             annotationService.deleteAllAnnotations(fileId, pageIndex);
@@ -239,7 +239,7 @@ public class OfdController {
      * GET /api/ofd/{fileId}/export
      */
     @GetMapping("/{fileId}/export")
-    public ResponseEntity<?> exportWithAnnotations(@PathVariable String fileId) {
+    public ResponseEntity<?> exportWithAnnotations(@PathVariable("fileId") String fileId) {
         try {
             log.info("导出含注释OFD: fileId={}", fileId);
 
