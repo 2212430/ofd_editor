@@ -2,7 +2,7 @@ import { defineStore, acceptHMRUpdate } from 'pinia'
 import { ref, computed, reactive, nextTick } from 'vue'
 import type {
     DocumentData, ElementData, PageData,
-    AnnotationData, AnnotationType, ToolType
+    AnnotationData, AnnotationType, ToolType, DocumentSource
 } from '@/types'
 import { ofdApi } from '@/api/ofdApi'
 
@@ -16,6 +16,7 @@ export const useEditorStore = defineStore('editor', () => {
     const isLoading = ref(false)
     const loadingText = ref('处理中...')
     const currentFile = ref<File | null>(null)
+    const documentSource = ref<DocumentSource | null>(null)
     const fileId = ref<string | null>(null)
 
     // 打印对话框可见性（跨组件协调：Toolbar 打开、App 编排打印）
@@ -289,8 +290,13 @@ export const useEditorStore = defineStore('editor', () => {
         }
     }
 
-    function setCurrentFile(file: File | null) {
+    function setCurrentFile(file: File | null, source?: DocumentSource) {
         currentFile.value = file
+        if (source) {
+            documentSource.value = source
+        } else if (!file) {
+            documentSource.value = null
+        }
     }
 
     function setCurrentPage(index: number) {
@@ -816,7 +822,7 @@ export const useEditorStore = defineStore('editor', () => {
     return {
         // ── 原有状态 ──
         document, currentPageIndex, selectedElementId,
-        scale, isLoading, loadingText, currentFile,
+        scale, isLoading, loadingText, currentFile, documentSource,
         history, historyIndex, fileId, renderVersion,
         printDialogVisible,
         // ── 注释状态 ──

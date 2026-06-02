@@ -47,7 +47,7 @@
         </RibbonGroup>
         <RibbonSep />
         <RibbonGroup label="文档">
-          <RibbonButton label="文档属性" :icon="InfoFilled" disabled tooltip="即将推出" @click="comingSoon" />
+          <RibbonButton label="文档属性" :icon="InfoFilled" :disabled="!store.document" @click="showDocumentProperties" />
         </RibbonGroup>
       </template>
 
@@ -245,6 +245,8 @@
         </div>
       </template>
     </div>
+
+    <DocumentPropertiesDialog v-model="docPropsVisible" />
   </div>
 </template>
 
@@ -263,6 +265,7 @@ import {
 import { useEditorStore } from '@/stores/editorStore'
 import { ofdApi, downloadBlob, promptDownloadBlob } from '@/api/ofdApi'
 import RibbonButton from '@/components/RibbonButton.vue'
+import DocumentPropertiesDialog from '@/components/DocumentPropertiesDialog.vue'
 
 const HandIcon = defineComponent({
   name: 'HandIcon',
@@ -289,6 +292,7 @@ const ofdInputRef = ref<HTMLInputElement>()
 const pdfInputRef = ref<HTMLInputElement>()
 const imageInputRef = ref<HTMLInputElement>()
 const stampInputRef = ref<HTMLInputElement>()
+const docPropsVisible = ref(false)
 const activeTab = ref('home')
 
 const tabs = [
@@ -329,6 +333,14 @@ function handleFitPage() {
   if (!store.fitToPage()) {
     ElMessage.warning('无法适应页面，请先打开文档')
   }
+}
+
+function showDocumentProperties() {
+  if (!store.document) {
+    ElMessage.warning('请先打开文档')
+    return
+  }
+  docPropsVisible.value = true
 }
 
 function showHelp() {
@@ -405,7 +417,7 @@ async function handleOfdUpload(e: Event) {
   try {
     const doc = await ofdApi.parseOfd(file)
     store.setDocument(doc)
-    store.setCurrentFile(file)
+    store.setCurrentFile(file, 'ofd')
     await store.loadAllAnnotations()
     ElMessage.success(`解析成功：${doc.title}，共${doc.pageCount}页`)
   } catch (err: any) {
@@ -476,7 +488,7 @@ async function handlePdfImport(e: Event) {
     const ofdFile = new File([blob], file.name.replace('.pdf', '.ofd'))
     const doc = await ofdApi.parseOfd(ofdFile)
     store.setDocument(doc)
-    store.setCurrentFile(ofdFile)
+    store.setCurrentFile(ofdFile, 'pdf')
     await store.loadAllAnnotations()
     ElMessage.success('PDF转换成功！')
   } catch (err: any) {

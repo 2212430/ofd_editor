@@ -152,7 +152,7 @@ async function handleWelcomeUpload(e: Event) {
     const doc = await ofdApi.parseOfd(file)
     store.setDocument(doc)
     await store.loadAllAnnotations()
-    store.setCurrentFile(file)
+    store.setCurrentFile(file, 'ofd')
     ElMessage.success(`解析成功：${doc.title}`)
   } catch (err: any) {
     ElMessage.error(err.message || '解析失败')
@@ -229,7 +229,7 @@ async function handleWelcomePdf(e: Event) {
     const ofdFile = new File([blob], file.name.replace(/\.pdf$/i, '.ofd'))
     const doc = await ofdApi.parseOfd(ofdFile)
     store.setDocument(doc)
-    store.setCurrentFile(ofdFile)
+    store.setCurrentFile(ofdFile, 'pdf')
     await store.loadAllAnnotations()
     ElMessage.success('PDF 转换成功！')
   } catch (err: any) {

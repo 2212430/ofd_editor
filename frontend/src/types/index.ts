@@ -122,6 +122,9 @@ export interface PageData {
     annotations?: AnnotationData[]   // ← 新增
 }
 
+// ========== 文档来源 ==========
+export type DocumentSource = 'ofd' | 'pdf'
+
 // ========== 文档数据（保持不变） ==========
 export interface DocumentData {
     fileId?: string
