@@ -71,7 +71,8 @@ public class OfdRebuildService {
         }
 
         if (!dirtyElements.isEmpty()) {
-            patchPageXmls(zipEntries, documentDTO, dirtyElements);
+            String docPrefix = extractDocPrefix(findPageContentXmlPaths(zipEntries));
+            patchPageXmls(zipEntries, documentDTO, dirtyElements, docPrefix);
         }
 
         byte[] result = zipFromMap(zipEntries);
@@ -339,7 +340,8 @@ public class OfdRebuildService {
      */
     private void patchPageXmls(Map<String, byte[]> zipEntries,
                                OfdDocumentDTO documentDTO,
-                               Map<String, ElementDTO> dirtyElements) throws Exception {
+                               Map<String, ElementDTO> dirtyElements,
+                               String docPrefix) throws Exception {
 
         // 按页构建 dirty 元素列表，方便后续按页匹配
         Map<Integer, List<ElementDTO>> dirtyByPage = new LinkedHashMap<>();
@@ -376,14 +378,21 @@ public class OfdRebuildService {
 
             LinkedHashSet<String> targets = new LinkedHashSet<>();
             targets.add(xmlPath);
-            // 模板层文本也在前端可编辑，这里一并尝试严格匹配更新
+            // 模板层文本也在前端可编辑，这里一并尝试严格匹配更新（新插入图片仅写入正文页）
             targets.addAll(templateXmlPaths);
 
             int touched = 0;
             for (String targetPath : targets) {
                 byte[] xmlBytes = zipEntries.get(targetPath);
                 if (xmlBytes == null) continue;
-                byte[] patchedXml = patchOnePageXml(xmlBytes, dirtyOnThisPage);
+                boolean isMainPage = targetPath.equals(xmlPath);
+                List<ElementDTO> batch = isMainPage
+                        ? dirtyOnThisPage
+                        : dirtyOnThisPage.stream()
+                                .filter(el -> !Boolean.TRUE.equals(el.getIsNew()))
+                                .toList();
+                if (batch.isEmpty()) continue;
+                byte[] patchedXml = patchOnePageXml(xmlBytes, batch, zipEntries, docPrefix, isMainPage);
                 zipEntries.put(targetPath, patchedXml);
                 touched++;
             }
@@ -449,13 +458,21 @@ public class OfdRebuildService {
     /**
      * 修改单页XML：找到匹配的TextObject节点，更新内容
      */
-    private byte[] patchOnePageXml(byte[] xmlBytes, List<ElementDTO> dirtyElements) throws Exception {
+    private byte[] patchOnePageXml(byte[] xmlBytes,
+                                   List<ElementDTO> dirtyElements,
+                                   Map<String, byte[]> zipEntries,
+                                   String docPrefix,
+                                   boolean allowInsertNew) throws Exception {
         Document doc = parseXml(xmlBytes);
         Element root = doc.getDocumentElement();
 
         for (ElementDTO el : dirtyElements) {
             try {
-                patchElement(doc, root, el);
+                if (allowInsertNew && Boolean.TRUE.equals(el.getIsNew()) && "IMAGE".equals(el.getType())) {
+                    insertNewImageElement(doc, root, el, zipEntries, docPrefix);
+                } else {
+                    patchElement(doc, root, el);
+                }
             } catch (Exception e) {
                 log.warn("修改元素失败 id={}: {}", el.getId(), e.getMessage());
             }
@@ -557,6 +574,9 @@ public class OfdRebuildService {
     }
 
     private void patchImageElement(Document doc, Element root, ElementDTO el) {
+        if (Boolean.TRUE.equals(el.getIsNew())) {
+            return;
+        }
         NodeList nodes = getElementsByLocalName(root, "ImageObject");
         Element matched = findBestMatchByBoundary(nodes, el);
         if (matched == null) {
@@ -1039,6 +1059,234 @@ public class OfdRebuildService {
         }
     }
 
+    // ---- 新插入图片（导入图片） ----
+
+    private void insertNewImageElement(Document pageDoc,
+                                       Element pageRoot,
+                                       ElementDTO el,
+                                       Map<String, byte[]> zipEntries,
+                                       String docPrefix) throws Exception {
+        byte[] imageBytes = decodeImageBase64(firstNonBlank(el.getImageBase64(), el.getImageData()));
+        if (imageBytes == null || imageBytes.length == 0) {
+            log.warn("导入图片无有效数据: id={}", el.getId());
+            return;
+        }
+
+        String ext = guessImageExtension(el.getImageBase64(), el.getImageData(), imageBytes);
+        int resourceId = allocateNextResourceId(zipEntries, docPrefix);
+        String resFileName = "image_" + resourceId + "." + ext;
+        String resZipPath = docPrefix + "/Res/" + resFileName;
+        zipEntries.put(resZipPath, imageBytes);
+
+        registerImageResource(zipEntries, docPrefix, resourceId, resFileName, ext);
+
+        String objId = String.valueOf(allocateNextXmlObjectId(pageRoot));
+        Element container = findOrCreatePageLayer(pageDoc, pageRoot);
+        Element imgObj = createPageImageObjectElement(pageDoc, pageRoot, el, String.valueOf(resourceId), objId);
+        container.appendChild(imgObj);
+
+        el.setResourceId(String.valueOf(resourceId));
+        el.setXmlObjId(objId);
+        el.setIsNew(false);
+
+        log.info("已插入新图片: id={}, resourceId={}, boundary=({}, {}, {}, {})",
+                el.getId(), resourceId, el.getX(), el.getY(), el.getWidth(), el.getHeight());
+    }
+
+    private byte[] decodeImageBase64(String dataUrlOrBase64) {
+        if (!isNotBlank(dataUrlOrBase64)) return null;
+        String s = dataUrlOrBase64.trim();
+        int comma = s.indexOf(',');
+        if (s.startsWith("data:") && comma > 0) {
+            s = s.substring(comma + 1);
+        }
+        try {
+            return Base64.getDecoder().decode(s.replaceAll("\\s", ""));
+        } catch (Exception e) {
+            log.warn("Base64 解码失败: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    private String guessImageExtension(String base64A, String base64B, byte[] bytes) {
+        String src = firstNonBlank(base64A, base64B);
+        if (isNotBlank(src)) {
+            String lower = src.toLowerCase(Locale.ROOT);
+            if (lower.contains("image/png")) return "png";
+            if (lower.contains("image/jpeg") || lower.contains("image/jpg")) return "jpg";
+            if (lower.contains("image/gif")) return "gif";
+            if (lower.contains("image/webp")) return "webp";
+            if (lower.contains("image/bmp")) return "bmp";
+        }
+        if (bytes != null && bytes.length >= 4) {
+            if ((bytes[0] & 0xFF) == 0xFF && (bytes[1] & 0xFF) == 0xD8) return "jpg";
+            if ((bytes[0] & 0xFF) == 0x89 && bytes[1] == 'P') return "png";
+            if (bytes[0] == 'G' && bytes[1] == 'I') return "gif";
+            if (bytes[0] == 'B' && bytes[1] == 'M') return "bmp";
+            if (bytes.length >= 12 && bytes[0] == 'R' && bytes[1] == 'I' && bytes[8] == 'W') return "webp";
+        }
+        return "png";
+    }
+
+    private int allocateNextResourceId(Map<String, byte[]> zipEntries, String docPrefix) {
+        int max = 1000;
+        String prefix = docPrefix.replace('\\', '/');
+        for (String key : zipEntries.keySet()) {
+            String k = key.replace('\\', '/');
+            if (!k.startsWith(prefix + "/Res/")) continue;
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("image_(\\d+)\\.", java.util.regex.Pattern.CASE_INSENSITIVE)
+                    .matcher(k);
+            if (m.find()) {
+                try {
+                    max = Math.max(max, Integer.parseInt(m.group(1)));
+                } catch (NumberFormatException ignore) {
+                }
+            }
+        }
+        String docResPath = findDocumentResXmlPath(zipEntries, prefix);
+        if (docResPath != null) {
+            try {
+                Document resDoc = parseXml(zipEntries.get(docResPath));
+                NodeList media = getElementsByLocalName(resDoc.getDocumentElement(), "MultiMedia");
+                for (int i = 0; i < media.getLength(); i++) {
+                    if (!(media.item(i) instanceof Element mm)) continue;
+                    String id = firstNonBlank(
+                            getAttrIgnoreNs(mm, "ID"),
+                            getAttrIgnoreNs(mm, "Id"),
+                            getAttrIgnoreNs(mm, "id"));
+                    if (isNotBlank(id)) {
+                        try {
+                            max = Math.max(max, Integer.parseInt(id.trim()));
+                        } catch (NumberFormatException ignore) {
+                        }
+                    }
+                }
+            } catch (Exception ignore) {
+            }
+        }
+        return max + 1;
+    }
+
+    private int allocateNextXmlObjectId(Element pageRoot) {
+        int max = 0;
+        NodeList all = pageRoot.getElementsByTagNameNS("*", "ImageObject");
+        if (all.getLength() == 0) all = pageRoot.getElementsByTagName("ImageObject");
+        for (int i = 0; i < all.getLength(); i++) {
+            if (!(all.item(i) instanceof Element e)) continue;
+            String id = firstNonBlank(
+                    getAttrIgnoreNs(e, "ID"),
+                    getAttrIgnoreNs(e, "Id"),
+                    getAttrIgnoreNs(e, "id"));
+            if (isNotBlank(id)) {
+                try {
+                    max = Math.max(max, Integer.parseInt(id.trim()));
+                } catch (NumberFormatException ignore) {
+                }
+            }
+        }
+        return max + 1;
+    }
+
+    private String findDocumentResXmlPath(Map<String, byte[]> zipEntries, String docPrefix) {
+        String[] candidates = {
+                docPrefix + "/DocumentRes.xml",
+                docPrefix.toLowerCase(Locale.ROOT) + "/DocumentRes.xml"
+        };
+        for (String c : candidates) {
+            if (zipEntries.containsKey(c)) return c;
+        }
+        for (String key : zipEntries.keySet()) {
+            String k = key.replace('\\', '/');
+            if (k.endsWith("/DocumentRes.xml") && k.startsWith(docPrefix.split("/")[0])) {
+                return key;
+            }
+        }
+        return null;
+    }
+
+    private void registerImageResource(Map<String, byte[]> zipEntries,
+                                     String docPrefix,
+                                     int resourceId,
+                                     String resFileName,
+                                     String ext) throws Exception {
+        String docResPath = findDocumentResXmlPath(zipEntries, docPrefix);
+        Document resDoc;
+        Element resRoot;
+        if (docResPath != null) {
+            resDoc = parseXml(zipEntries.get(docResPath));
+            resRoot = resDoc.getDocumentElement();
+        } else {
+            docResPath = docPrefix + "/DocumentRes.xml";
+            resDoc = DocumentBuilderFactory.newInstance().newDocumentBuilder().newDocument();
+            resRoot = resDoc.createElementNS("http://www.ofdspec.org/2016", "ofd:Res");
+            resRoot.setAttribute("xmlns:ofd", "http://www.ofdspec.org/2016");
+            resDoc.appendChild(resRoot);
+        }
+
+        String ns = resRoot.getNamespaceURI();
+        Element mm = ns != null
+                ? resDoc.createElementNS(ns, "MultiMedia")
+                : resDoc.createElement("MultiMedia");
+        setAttrIgnoreNs(mm, "ID", String.valueOf(resourceId));
+        setAttrIgnoreNs(mm, "Type", "Image");
+        setAttrIgnoreNs(mm, "Format", ext.toUpperCase(Locale.ROOT));
+
+        Element mediaFile = ns != null
+                ? resDoc.createElementNS(ns, "MediaFile")
+                : resDoc.createElement("MediaFile");
+        mediaFile.setTextContent("Res/" + resFileName);
+        mm.appendChild(mediaFile);
+        resRoot.appendChild(mm);
+
+        zipEntries.put(docResPath, serializeXml(resDoc));
+    }
+
+    private Element findOrCreatePageLayer(Document doc, Element pageRoot) {
+        Element content = findChildElementByLocalName(pageRoot, "Content");
+        if (content == null) {
+            String ns = pageRoot.getNamespaceURI();
+            content = ns != null ? doc.createElementNS(ns, "Content") : doc.createElement("Content");
+            pageRoot.appendChild(content);
+        }
+
+        Element layer = findChildElementByLocalName(content, "Layer");
+        if (layer != null) return layer;
+
+        String ns = content.getNamespaceURI();
+        if (ns == null) ns = pageRoot.getNamespaceURI();
+        layer = ns != null ? doc.createElementNS(ns, "Layer") : doc.createElement("Layer");
+        setAttrIgnoreNs(layer, "ID", "1");
+        content.appendChild(layer);
+        return layer;
+    }
+
+    private Element createPageImageObjectElement(Document doc,
+                                                 Element pageRoot,
+                                                 ElementDTO el,
+                                                 String resourceId,
+                                                 String objId) {
+        String ns = pageRoot.getNamespaceURI();
+        Element img = ns != null ? doc.createElementNS(ns, "ImageObject") : doc.createElement("ImageObject");
+        setAttrIgnoreNs(img, "ID", objId);
+        setAttrIgnoreNs(img, "ResourceID", resourceId);
+        String boundary = String.format(Locale.ROOT, "%.3f %.3f %.3f %.3f",
+                nvl(el.getX()), nvl(el.getY()), nvl(el.getWidth()), nvl(el.getHeight()));
+        setAttrIgnoreNs(img, "Boundary", boundary);
+        if (el.getRotation() != null && Math.abs(el.getRotation()) > 0.001) {
+            setAttrIgnoreNs(img, "CTM", buildRotationCtm(el.getRotation(), nvl(el.getX()), nvl(el.getY())));
+        }
+        return img;
+    }
+
+    private String buildRotationCtm(double rotationDeg, double tx, double ty) {
+        double rad = Math.toRadians(rotationDeg);
+        double cos = Math.cos(rad);
+        double sin = Math.sin(rad);
+        return String.format(Locale.ROOT, "%.6f %.6f %.6f %.6f %.6f %.6f",
+                cos, sin, -sin, cos, tx, ty);
+    }
+
     // =========================================================
     // ZIP 操作
     // =========================================================
@@ -1222,6 +1470,8 @@ public class OfdRebuildService {
         log.info("开始重建含注释的OFD，共 {} 页有注释", allAnnotations.size());
 
         Map<String, byte[]> zipEntries = unzipToMap(originalOfd);
+        List<String> pagePaths = findPageContentXmlPaths(zipEntries);
+        String docPrefix = extractDocPrefix(pagePaths);
 
         for (Map.Entry<Integer, List<AnnotationDTO>> entry : allAnnotations.entrySet()) {
             int pageIndex = entry.getKey();
@@ -1237,7 +1487,7 @@ public class OfdRebuildService {
                     ? zipEntries.get(annotPath)
                     : createEmptyAnnotationXml();
 
-            byte[] patchedXml = patchAnnotationXml(xmlBytes, annotations);
+            byte[] patchedXml = patchAnnotationXml(xmlBytes, annotations, zipEntries, docPrefix);
             zipEntries.put(annotPath, patchedXml);
             log.debug("写入注释: page={}, path={}, count={}", pageIndex, annotPath, annotations.size());
         }
@@ -1257,6 +1507,8 @@ public class OfdRebuildService {
         }
 
         Map<String, byte[]> zipEntries = unzipToMap(originalOfd);
+        List<String> pagePaths = findPageContentXmlPaths(zipEntries);
+        String docPrefix = extractDocPrefix(pagePaths);
         int pageIndex = annotation.getPageIndex() != null ? annotation.getPageIndex() : 0;
 
         String annotPath = findAnnotationXmlPath(zipEntries, pageIndex);
@@ -1271,7 +1523,7 @@ public class OfdRebuildService {
         // 追加该条注释
         Document doc = parseXml(xmlBytes);
         Element root = doc.getDocumentElement();
-        Element annEl = createAnnotationElement(doc, annotation);
+        Element annEl = createAnnotationElement(doc, annotation, zipEntries, docPrefix);
         if (annEl != null) {
             root.appendChild(annEl);
         }
@@ -1293,6 +1545,8 @@ public class OfdRebuildService {
         }
 
         Map<String, byte[]> zipEntries = unzipToMap(originalOfd);
+        List<String> pagePaths = findPageContentXmlPaths(zipEntries);
+        String docPrefix = extractDocPrefix(pagePaths);
         int pageIndex = updated.getPageIndex() != null ? updated.getPageIndex() : 0;
 
         String annotPath = findAnnotationXmlPath(zipEntries, pageIndex);
@@ -1317,7 +1571,7 @@ public class OfdRebuildService {
                 removeTarget.getWidth(), removeTarget.getHeight());
 
         // 追加新节点
-        Element annEl = createAnnotationElement(doc, updated);
+        Element annEl = createAnnotationElement(doc, updated, zipEntries, docPrefix);
         if (annEl != null) {
             root.appendChild(annEl);
         }
@@ -1410,20 +1664,22 @@ public class OfdRebuildService {
         return xml.getBytes(StandardCharsets.UTF_8);
     }
 
-    private byte[] patchAnnotationXml(byte[] xmlBytes, List<AnnotationDTO> annotations) throws Exception {
+    private byte[] patchAnnotationXml(byte[] xmlBytes, List<AnnotationDTO> annotations,
+                                      Map<String, byte[]> zipEntries, String docPrefix) throws Exception {
         Document doc = parseXml(xmlBytes);
         Element root = doc.getDocumentElement();
         for (AnnotationDTO ann : annotations) {
-            Element el = createAnnotationElement(doc, ann);
+            Element el = createAnnotationElement(doc, ann, zipEntries, docPrefix);
             if (el != null) root.appendChild(el);
         }
         return serializeXml(doc);
     }
 
-    private Element createAnnotationElement(Document doc, AnnotationDTO ann) {
+    private Element createAnnotationElement(Document doc, AnnotationDTO ann,
+                                            Map<String, byte[]> zipEntries, String docPrefix) {
         if (ann == null || ann.getType() == null) return null;
         return switch (ann.getType()) {
-            case "STAMP"                                                         -> createStampElement(doc, ann);
+            case "STAMP"                                                         -> createStampElement(doc, ann, zipEntries, docPrefix);
             case "TEXTBOX", "STICKYNOTE"                                         -> createTextElement(doc, ann);
             case "HIGHLIGHT", "UNDERLINE", "STRIKEOUT",
                  "RECTANGLE", "CIRCLE", "ARROW", "FREEHAND"                     -> createPathElement(doc, ann);
@@ -1434,13 +1690,30 @@ public class OfdRebuildService {
         };
     }
 
-    private Element createStampElement(Document doc, AnnotationDTO ann) {
-        Element el = doc.createElement("ImageObject");
+    /**
+     * OFD 图章：Annots 层 ImageObject + ResourceID，图片写入 Doc_x/Res/ 并在 DocumentRes 注册
+     */
+    private Element createStampElement(Document doc, AnnotationDTO ann,
+                                       Map<String, byte[]> zipEntries, String docPrefix) {
+        Element root = doc.getDocumentElement();
+        String ns = root != null ? root.getNamespaceURI() : null;
+        Element el = ns != null ? doc.createElementNS(ns, "ImageObject") : doc.createElement("ImageObject");
         setBoundaryAttr(el, ann);
-        // AnnotationDTO 无 resourceId 字段，stampBase64 存入自定义属性
-        if (isNotBlank(ann.getStampBase64())) {
-            // 不直接嵌入 Base64（会使文件过大），记录占位属性即可
-            el.setAttribute("StampType", "base64");
+
+        if (zipEntries != null && isNotBlank(docPrefix) && isNotBlank(ann.getStampBase64())) {
+            byte[] imageBytes = decodeImageBase64(ann.getStampBase64());
+            if (imageBytes != null && imageBytes.length > 0) {
+                try {
+                    int resourceId = allocateNextResourceId(zipEntries, docPrefix);
+                    String ext = guessImageExtension(ann.getStampBase64(), null, imageBytes);
+                    String resFileName = "image_" + resourceId + "." + ext;
+                    zipEntries.put(docPrefix + "/Res/" + resFileName, imageBytes);
+                    registerImageResource(zipEntries, docPrefix, resourceId, resFileName, ext);
+                    setAttrIgnoreNs(el, "ResourceID", String.valueOf(resourceId));
+                } catch (Exception e) {
+                    log.warn("图章资源写入失败: {}", e.getMessage());
+                }
+            }
         }
         return el;
     }

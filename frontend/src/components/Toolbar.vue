@@ -3,6 +3,8 @@
     <!-- 隐藏文件输入 -->
     <input ref="ofdInputRef" type="file" accept=".ofd" style="display:none" @change="handleOfdUpload" />
     <input ref="pdfInputRef" type="file" accept=".pdf" style="display:none" @change="handlePdfImport" />
+    <input ref="imageInputRef" type="file" accept="image/*" style="display:none" @change="handleImageImport" />
+    <input ref="stampInputRef" type="file" accept="image/*" style="display:none" @change="handleStampImageSelect" />
 
     <!-- 标签栏 -->
     <nav class="ribbon-tabs">
@@ -110,6 +112,16 @@
           <RibbonButton label="便利贴" :icon="Memo" :active="store.currentTool === 'STICKYNOTE'" @click="store.setTool('STICKYNOTE')" />
         </RibbonGroup>
         <RibbonSep />
+        <RibbonGroup label="图章">
+          <RibbonButton
+              label="导入图章"
+              :icon="Stamp"
+              :active="store.currentTool === 'STAMP'"
+              :disabled="!store.document"
+              @click="stampInputRef?.click()"
+          />
+        </RibbonGroup>
+        <RibbonSep />
         <RibbonGroup label="样式">
           <div class="ribbon-style-row">
             <span class="style-label">颜色</span>
@@ -177,8 +189,12 @@
           <RibbonButton label="重排页面" :icon="Sort" :disabled="!store.document" tooltip="拖动左侧缩略图调整顺序" @click="handleReorderHint" />
         </RibbonGroup>
         <RibbonSep />
+        <RibbonGroup label="插入">
+          <RibbonButton label="导入图片" :icon="Picture" :disabled="!store.document" @click="imageInputRef?.click()" />
+        </RibbonGroup>
+        <RibbonSep />
         <RibbonGroup label="高级">
-          <RibbonButton label="图像替换" :icon="Picture" disabled tooltip="即将推出" @click="comingSoon" />
+          <RibbonButton label="图像替换" :icon="PictureFilled" disabled tooltip="即将推出" @click="comingSoon" />
           <RibbonButton label="路径编辑" :icon="EditPen" disabled tooltip="即将推出" @click="comingSoon" />
         </RibbonGroup>
       </template>
@@ -244,6 +260,8 @@ import RibbonButton from '@/components/RibbonButton.vue'
 const store = useEditorStore()
 const ofdInputRef = ref<HTMLInputElement>()
 const pdfInputRef = ref<HTMLInputElement>()
+const imageInputRef = ref<HTMLInputElement>()
+const stampInputRef = ref<HTMLInputElement>()
 const activeTab = ref('home')
 
 const tabs = [
@@ -278,8 +296,10 @@ function showHelp() {
   ElMessageBox.alert(
       '1. 「文件」打开 OFD 或导入 PDF\n' +
       '2. 「主页」选择工具并编辑页面元素\n' +
-      '3. 「注释」添加高亮、图形等批注\n' +
-      '4. 「转换」导出 PDF；「文件 → 打印」输出纸质或 PDF',
+      '3. 「编辑 → 插入」可导入图片到当前页\n' +
+      '4. 「注释 → 导入图章」选择图片后点击页面放置图章\n' +
+      '5. 「注释」添加高亮、图形等批注\n' +
+      '6. 「转换」导出 PDF；「文件 → 打印」输出纸质或 PDF',
       '快速上手',
       { confirmButtonText: '知道了' }
   )
@@ -357,6 +377,57 @@ async function handleOfdUpload(e: Event) {
   }
 }
 
+async function handleStampImageSelect(e: Event) {
+  const file = (e.target as HTMLInputElement).files?.[0]
+  if (!file) return
+  if (!store.document) {
+    ElMessage.warning('请先打开 OFD 文件')
+    return
+  }
+  if (!file.type.startsWith('image/')) {
+    ElMessage.error('请选择图片格式的图章文件')
+    return
+  }
+  try {
+    const dataUrl = await readFileAsDataUrl(file)
+    store.setPendingStampImage(dataUrl)
+    activeTab.value = 'comment'
+    ElMessage.success('已选择图章，请点击页面放置（可重复放置）')
+  } catch (err: any) {
+    ElMessage.error(err.message || '读取图章失败')
+  } finally {
+    ;(e.target as HTMLInputElement).value = ''
+  }
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result))
+    reader.onerror = () => reject(new Error('读取文件失败'))
+    reader.readAsDataURL(file)
+  })
+}
+
+async function handleImageImport(e: Event) {
+  const file = (e.target as HTMLInputElement).files?.[0]
+  if (!file) return
+  if (!store.document) {
+    ElMessage.warning('请先打开 OFD 文件')
+    return
+  }
+  store.setLoading(true, '正在导入图片...')
+  try {
+    await store.importImageToPage(store.currentPageIndex, file)
+    ElMessage.success('图片已添加到当前页')
+  } catch (err: any) {
+    ElMessage.error(err.message || '导入图片失败')
+  } finally {
+    store.setLoading(false)
+    ;(e.target as HTMLInputElement).value = ''
+  }
+}
+
 async function handlePdfImport(e: Event) {
   const file = (e.target as HTMLInputElement).files?.[0]
   if (!file) return
@@ -383,6 +454,7 @@ async function handleSaveOfd() {
   try {
     const blob = await ofdApi.saveOfd(store.getDocumentForSave()!)
     downloadBlob(blob, `${store.document.title}.ofd`)
+    store.markNewElementsPersisted()
     ElMessage.success('保存成功！')
   } catch (err: any) {
     ElMessage.error(err.message || '保存失败')

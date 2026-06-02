@@ -38,6 +38,10 @@ public class ElementDTO {
      * 前端按此走多行渲染：每个字符独立成行、字号取 {@code Size} 而非外接框高度。
      */
     private Boolean verticalLayout;
+    /** 密码区网格排版（{@code g N} 语法），前端禁用自动换行并按行距渲染 */
+    private Boolean passwordGrid;
+    /** TextCode DeltaX 平均字距（mm），供前端还原 OFD 逐字排版 */
+    private Double glyphAdvanceMm;
 
     // ========== 变换相关 ==========
     // 旋转角度
@@ -71,6 +75,8 @@ public class ElementDTO {
     private String imageData;
 
     // ========== 编辑状态 ==========
+    /** 用户新插入的元素（如导入图片），保存时需写入 OFD 而非匹配已有 XML 节点 */
+    private Boolean isNew;
     // 是否被修改
     private Boolean isDirty;
 

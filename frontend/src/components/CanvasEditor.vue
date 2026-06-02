@@ -19,8 +19,18 @@
         <v-rect :config="bgConfig" />
 
         <template v-for="element in page.elements" :key="element.id">
+          <v-group
+              v-if="element.type === 'TEXT' && isCurrencySplitText(element)"
+              :config="getCurrencyGroupConfig(element)"
+              @click="handleElementClick($event, element.id)"
+              @dragend="(e: any) => handleDragEnd(e, element.id)"
+              @transformend="(e: any) => handleTransformEnd(e, element.id)"
+          >
+            <v-text :config="getCurrencyHeadConfig(element)" />
+            <v-text :config="getCurrencyTailConfig(element)" />
+          </v-group>
           <v-text
-              v-if="element.type === 'TEXT'"
+              v-else-if="element.type === 'TEXT'"
               :config="getTextConfig(element)"
               @click="handleElementClick($event, element.id)"
               @dragend="(e: any) => handleDragEnd(e, element.id)"
@@ -265,7 +275,14 @@ watch(
             const node: any = stage.findOne('#' + el.id)
             if (!node) continue
             if (el.type === 'TEXT') {
-              node.setAttrs(getTextConfig(el))
+              if (isCurrencySplitText(el)) {
+                const grp = stage.findOne('#' + el.id)
+                grp?.setAttrs(getCurrencyGroupConfig(el))
+                stage.findOne('#' + el.id + '-cur-h')?.setAttrs(getCurrencyHeadConfig(el))
+                stage.findOne('#' + el.id + '-cur-t')?.setAttrs(getCurrencyTailConfig(el))
+              } else {
+                node.setAttrs(getTextConfig(el))
+              }
             } else if (el.type === 'PATH') {
               node.setAttrs(getPathConfig(el))
             } else if (el.type === 'IMAGE' && imageMap[el.id]) {
@@ -398,6 +415,17 @@ const annotationConfigs = computed(() =>
 // ─────────────────────────────────────────────
 const stampImageMap = reactive<Record<string, HTMLImageElement>>({})
 
+function stampImageSrc(stampBase64?: string): string {
+  if (!stampBase64) return ''
+  if (stampBase64.startsWith('data:')) return stampBase64
+  return `data:image/png;base64,${stampBase64}`
+}
+
+function toRawBase64(dataUrl: string): string {
+  const comma = dataUrl.indexOf(',')
+  return comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl
+}
+
 watch(
     currentPageAnnotations,
     (anns) => {
@@ -405,7 +433,7 @@ watch(
         if (ann.type !== 'STAMP' || !ann.stampBase64 || stampImageMap[ann.id]) continue
         const img = new window.Image()
         img.onload = () => { stampImageMap[ann.id] = img }
-        img.src = `data:image/png;base64,${ann.stampBase64}`
+        img.src = stampImageSrc(ann.stampBase64)
       }
     },
     { immediate: true, deep: false }
@@ -414,18 +442,24 @@ watch(
 // ─────────────────────────────────────────────
 // OFD 元素 Transformer 跟踪
 // ─────────────────────────────────────────────
-watch(() => store.selectedElementId, async (id) => {
+async function refreshElementTransformer(elementId: string) {
   await nextTick()
   const transformer = transformerRef.value?.getNode()
   const stage       = stageRef.value?.getNode()
-  if (!transformer || !stage) return
-  if (id) {
-    const node = stage.findOne(`#${id}`)
-    if (node) {
-      transformer.nodes([node])
-      transformer.getLayer()?.batchDraw()
-    }
-  } else {
+  if (!transformer || !stage || store.selectedElementId !== elementId) return
+  const node = stage.findOne('#' + elementId)
+  if (node) {
+    transformer.nodes([node])
+    transformer.getLayer()?.batchDraw()
+  }
+}
+
+watch(() => store.selectedElementId, async (id) => {
+  if (id) await refreshElementTransformer(id)
+  else {
+    await nextTick()
+    const transformer = transformerRef.value?.getNode()
+    if (!transformer) return
     transformer.nodes([])
     transformer.getLayer()?.batchDraw()
   }
@@ -687,7 +721,59 @@ function handleStageClick(e: any) {
       lineWidth:   1,
     }
     openTextEdit()
+    return
   }
+  if (store.currentTool === 'STAMP') {
+    const stampSrc = store.pendingStampImage
+    if (!stampSrc) {
+      ElMessage.warning('请先在注释栏点击「导入图章」选择图片')
+      return
+    }
+    void placeStampAt(pos.x, pos.y, stampSrc)
+  }
+}
+
+// ─────────────────────────────────────────────
+// 图章放置
+// ─────────────────────────────────────────────
+async function placeStampAt(clickX: number, clickY: number, dataUrl: string) {
+  try {
+    const { width: pxW, height: pxH } = await loadImageDimensions(dataUrl)
+    let wMm = pxW / MM_TO_PX
+    let hMm = pxH / MM_TO_PX
+    const maxSize = 40
+    if (wMm > maxSize || hMm > maxSize) {
+      const scale = maxSize / Math.max(wMm, hMm)
+      wMm *= scale
+      hMm *= scale
+    }
+    const x = Math.max(0, clickX - wMm / 2)
+    const y = Math.max(0, clickY - hMm / 2)
+
+    const result = await store.addAnnotation({
+      type: 'STAMP',
+      pageIndex: props.pageIndex,
+      x, y, width: wMm, height: hMm,
+      opacity: store.annotationOpacity,
+      stampBase64: toRawBase64(dataUrl),
+    })
+    if (result) {
+      ElMessage.success({ message: '图章已添加', duration: 1200, showClose: false })
+    } else {
+      ElMessage.error('图章保存失败，请检查后端连接')
+    }
+  } catch (err: any) {
+    ElMessage.error(err.message || '放置图章失败')
+  }
+}
+
+function loadImageDimensions(src: string): Promise<{ width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight })
+    img.onerror = () => reject(new Error('无法解析图章图片'))
+    img.src = src
+  })
 }
 
 function handleElementClick(e: any, elementId: string) {
@@ -911,22 +997,44 @@ async function commitAnnotation(
 // ─────────────────────────────────────────────
 // OFD 元素拖拽 / 变换
 // ─────────────────────────────────────────────
-function handleDragEnd(e: any, elementId: string) {
+async function handleDragEnd(e: any, elementId: string) {
   store.updateElement(props.pageIndex, elementId, {
     x: px2mm(e.target.x()),
     y: px2mm(e.target.y()),
   })
+  await refreshElementTransformer(elementId)
 }
 
-function handleTransformEnd(e: any, elementId: string) {
+async function handleTransformEnd(e: any, elementId: string) {
   const node = e.target
-  store.updateElement(props.pageIndex, elementId, {
-    x:        px2mm(node.x()),
-    y:        px2mm(node.y()),
-    scaleX:   node.scaleX(),
-    scaleY:   node.scaleY(),
-    rotation: node.rotation(),
-  })
+  const element = props.page.elements.find(el => el.id === elementId)
+
+  if (element?.type === 'IMAGE') {
+    const scaleX = node.scaleX()
+    const scaleY = node.scaleY()
+    const newWidth  = px2mm(node.width() * Math.abs(scaleX))
+    const newHeight = px2mm(node.height() * Math.abs(scaleY))
+    node.scaleX(1)
+    node.scaleY(1)
+    store.updateElement(props.pageIndex, elementId, {
+      x:        px2mm(node.x()),
+      y:        px2mm(node.y()),
+      width:    newWidth,
+      height:   newHeight,
+      scaleX:   1,
+      scaleY:   1,
+      rotation: node.rotation(),
+    })
+  } else {
+    store.updateElement(props.pageIndex, elementId, {
+      x:        px2mm(node.x()),
+      y:        px2mm(node.y()),
+      scaleX:   node.scaleX(),
+      scaleY:   node.scaleY(),
+      rotation: node.rotation(),
+    })
+  }
+  await refreshElementTransformer(elementId)
 }
 
 // ─────────────────────────────────────────────
@@ -963,6 +1071,7 @@ function approxAdvanceEm(ch: string): number {
       (code >= 0x3000 && code <= 0x303f)
   ) return 1.0
   if (ch === ' ') return 0.32
+  if (ch === '¥' || ch === '￥' || ch === '\u00a5' || ch === '\uffe5') return 0.72
   if (/[il.,;:'!|`]/.test(ch)) return 0.30
   if (/[A-Z0-9#&%@$]/.test(ch)) return 0.62
   return 0.55
@@ -974,6 +1083,121 @@ function estimateNaturalWidthMm(text: string, fsMm: number): number {
   return sum * fsMm
 }
 
+function formatCurrencyDisplayText(text: string): string {
+  return text.replace(/([¥￥])(?=\d)/g, '$1\u2002')
+}
+
+function normalizeCurrencyContent(raw: string): string {
+  return raw.replace(/\s*\n\s*/g, '').trim()
+}
+
+function isCurrencySplitText(element: ElementData): boolean {
+  if (element.verticalLayout || element.passwordGrid) return false
+  const t = normalizeCurrencyContent(element.content ?? '')
+  if (/^[¥￥][\d.,]+$/.test(t)) return true
+  return /[¥￥][\d.,]+$/.test(t) && t.length <= 24
+}
+
+function getCurrencySplitParts(content: string): { prefix: string; symbol: string; tail: string } | null {
+  const t = normalizeCurrencyContent(content)
+  const m = t.match(/^(.*?)([¥￥])([\d.,]+)$/)
+  if (m) return { prefix: m[1], symbol: m[2], tail: m[3] }
+  return null
+}
+
+/** 数字段 x：前缀宽 + max(OFD 字距, Web ¥ 实际宽) */
+function currencyTailOffsetPx(prefix: string, fsMm: number, glyphAdvanceMm?: number): number {
+  const sc = MM_TO_PX * store.scale
+  const prefixW = prefix ? estimateNaturalWidthMm(prefix, fsMm) * sc : 0
+  const ofdGap = typeof glyphAdvanceMm === 'number' && glyphAdvanceMm > 0
+      ? glyphAdvanceMm * sc : fsMm * sc * 0.55
+  const yuanWeb = fsMm * sc * 0.82
+  return prefixW + Math.max(ofdGap, yuanWeb) + fsMm * sc * 0.05
+}
+
+function buildTextFontStyle(element: ElementData, fsPx: number) {
+  const fontStack = [element.fontFamily, 'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', 'sans-serif']
+      .filter((x): x is string => typeof x === 'string' && x.length > 0)
+      .join(', ')
+  return {
+    fontSize:   fsPx,
+    fontFamily: fontStack,
+    fontStyle:  `${element.bold ? 'bold' : 'normal'} ${element.italic ? 'italic' : ''}`.trim(),
+    fill:       element.color ?? '#000000',
+    wrap:       'none' as const,
+    lineHeight: 1.15,
+  }
+}
+
+function resolveTextFontPx(element: ElementData): number {
+  const content = element.content ?? ''
+  const hasNl   = content.includes('\n')
+  const fsMm    = element.fontSize ?? 3
+  const wMm     = element.width ?? 0
+  const hMm     = element.height ?? 0
+  const wPx     = wMm > 0 ? wMm * MM_TO_PX * store.scale : 0
+  const hPx     = hMm > 0 ? hMm * MM_TO_PX * store.scale : 0
+  const isVertical = element.verticalLayout === true || (hasNl && wMm > 0 && hMm > 0 && hMm > wMm * 1.5)
+  let fsPx = fsMm * MM_TO_PX * store.scale
+  const userOverride = element.fontSizeOverridden === true
+  if (isVertical && !userOverride && wPx > 0) fsPx = Math.min(fsPx, wPx * 0.92)
+  else if (!userOverride && !hasNl && content.length <= 20 && hPx > 2 && (wPx <= 0 || hPx < wPx * 1.5)) {
+    fsPx = Math.min(hPx * 0.94, Math.max(fsPx, hPx * 0.56))
+  }
+  return fsPx
+}
+
+function getCurrencyGroupConfig(element: ElementData) {
+  const isSelected = store.selectedElementId === element.id
+  return {
+    id:        element.id,
+    x:         s(element.x),
+    y:         s(element.y),
+    rotation:  element.rotation ?? 0,
+    draggable: !store.isAnnotationTool,
+    stroke:    isSelected ? '#1a73e8' : undefined,
+    strokeWidth: isSelected ? 0.5 : 0,
+  }
+}
+
+function getCurrencyHeadConfig(element: ElementData) {
+  const parts = getCurrencySplitParts(element.content ?? '')
+  const fsPx  = resolveTextFontPx(element)
+  const isSelected = store.selectedElementId === element.id
+  const headText = parts ? parts.prefix + parts.symbol : ''
+  return {
+    id:    `${element.id}-cur-h`,
+    x:     0,
+    y:     0,
+    text:  headText,
+    ...buildTextFontStyle(element, fsPx),
+    letterSpacing: 0,
+    align: 'left' as const,
+    verticalAlign: 'top' as const,
+    stroke: isSelected ? '#1a73e8' : undefined,
+    strokeWidth: isSelected ? 0.5 : 0,
+  }
+}
+
+function getCurrencyTailConfig(element: ElementData) {
+  const parts = getCurrencySplitParts(element.content ?? '')
+  const fsMm  = element.fontSize ?? 3
+  const fsPx  = resolveTextFontPx(element)
+  const isSelected = store.selectedElementId === element.id
+  return {
+    id:    `${element.id}-cur-t`,
+    x:     parts ? currencyTailOffsetPx(parts.prefix, fsMm, element.glyphAdvanceMm) : 0,
+    y:     0,
+    text:  parts?.tail ?? '',
+    ...buildTextFontStyle(element, fsPx),
+    letterSpacing: 0,
+    align: 'left' as const,
+    verticalAlign: 'top' as const,
+    stroke: isSelected ? '#1a73e8' : undefined,
+    strokeWidth: isSelected ? 0.5 : 0,
+  }
+}
+
 function getTextConfig(element: ElementData) {
   const isSelected = store.selectedElementId === element.id
   const content    = element.content ?? ''
@@ -983,6 +1207,8 @@ function getTextConfig(element: ElementData) {
   const hMm        = element.height ?? 0
   // 后端竖排：content 已按字符拆为多行；用列宽做字号上限，避免被外接框高度撑爆
   const isVertical = element.verticalLayout === true || (hasNl && wMm > 0 && hMm > 0 && hMm > wMm * 1.5)
+  const isPasswordGrid = element.passwordGrid === true
+  const isMultiLineHorizontal = !isVertical && hasNl && wMm > 0 && !isPasswordGrid
 
   let fsPx = fsMm * MM_TO_PX * store.scale
   const hPx = hMm > 0 ? hMm * MM_TO_PX * store.scale : 0
@@ -992,27 +1218,51 @@ function getTextConfig(element: ElementData) {
   if (isVertical && !userOverride) {
     // 竖排：字号上限取列宽（避免溢出到隔壁列）
     if (wPx > 0) fsPx = Math.min(fsPx, wPx * 0.92)
-  } else if (!userOverride && !hasNl && hPx > 2 && (wPx <= 0 || hPx < wPx * 1.5)) {
-    /** 横向条带：ofdrw 字号偶发偏小，用外接框高度抬到可读下限；避免误判导致“微尘字” */
+  } else if (!userOverride && !hasNl && content.length <= 20 && hPx > 2 && (wPx <= 0 || hPx < wPx * 1.5)) {
+    /** 横向短标签：ofdrw 字号偶发偏小，用外接框高度抬到可读下限；长串（如密码区）不抬 */
     fsPx = Math.min(hPx * 0.94, Math.max(fsPx, hPx * 0.56))
   }
 
-  // 替换字体下的横向 advance 与 OFD 原 Glyph 不一致，按 Boundary.w 补 letterSpacing 把片段撑满
+  // 仅金额类文本按 OFD DeltaX 补字距（¥ 与数字）；销售方等普通字段不拉伸
   let letterSpacing = 0
-  if (!isVertical && !hasNl && wMm > 0 && content.length > 1) {
+  const trimmed = content.trim()
+  const isCurrencyAmount = /^[¥￥][\d.,]+$/.test(trimmed)
+      || (/[¥￥][\d.,]+$/.test(trimmed) && trimmed.length <= 24)
+  const isNumericOrAmount = /^[\d¥￥.,/%\-+\s()（）：:]*$/.test(trimmed)
+  const isStretchLabel = !isVertical && !isPasswordGrid && !hasNl && !isMultiLineHorizontal && wMm > 0
+      && content.length > 1 && content.length <= 8 && !isNumericOrAmount && !isCurrencyAmount
+      && !content.includes('：') && !content.includes(':')
+  if (isStretchLabel) {
     const fsMmRendered = fsPx / (MM_TO_PX * store.scale)
     const naturalMm    = estimateNaturalWidthMm(content, fsMmRendered)
     const gapMm        = wMm - naturalMm
-    if (gapMm > 0.05) {
+    if (gapMm > 0.05 && gapMm < wMm * 0.35) {
       const lsMm = gapMm / (content.length - 1)
-      // 单字符间距上限不超过 0.6em，避免极端情况下字符拉得过散
       letterSpacing = Math.min(lsMm, fsMmRendered * 0.6) * MM_TO_PX * store.scale
     }
+  } else if (isCurrencyAmount && !isVertical && !isPasswordGrid && !hasNl) {
+    const fsMmR = fsPx / (MM_TO_PX * store.scale)
+    const ofdAdv = element.glyphAdvanceMm
+    if (typeof ofdAdv === 'number' && ofdAdv > 0) {
+      const lsMm = ofdAdv - fsMmR * 0.32
+      if (lsMm > 0.02) letterSpacing = lsMm * MM_TO_PX * store.scale
+    } else {
+      letterSpacing = fsMm * 0.15 * MM_TO_PX * store.scale
+    }
   }
+
+  const displayText = isCurrencyAmount ? formatCurrencyDisplayText(content) : content
 
   const fontStack = [element.fontFamily, 'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', 'sans-serif']
       .filter((x): x is string => typeof x === 'string' && x.length > 0)
       .join(', ')
+
+  const lineCount = hasNl ? content.split('\n').length : 1
+  let lineHeight = hasNl ? (isVertical ? 1.05 : 1.12) : 1.15
+  if (isPasswordGrid && lineCount > 1 && hMm > 0 && fsMm > 0) {
+    /** 密码区：按外接框高度均分行距，避免底部溢出 */
+    lineHeight = Math.min(1.12, Math.max(0.92, (hMm * 0.96) / (lineCount * fsMm)))
+  }
 
   const baseCfg = {
     id:             element.id,
@@ -1020,22 +1270,25 @@ function getTextConfig(element: ElementData) {
     y:              s(element.y),
     rotation:       element.rotation ?? 0,
     draggable:      !store.isAnnotationTool,
-    text:           content,
+    text:           displayText,
     fontSize:       fsPx,
     letterSpacing,
-    lineHeight:     hasNl ? (isVertical ? 1.05 : 1.25) : 1.15,
+    lineHeight,
     fontFamily:     fontStack,
     fontStyle:      `${element.bold ? 'bold' : 'normal'} ${element.italic ? 'italic' : ''}`.trim(),
     align:          isVertical ? 'center' : 'left',
-    verticalAlign:  'top',
-    /** 横向 OFD 多窄盒单行，不绑 width 避免 Konva 假断字；竖排时绑列宽以居中每个字符 */
+    verticalAlign:  (isVertical || isPasswordGrid) ? 'middle' : 'top',
+    /** 后端已插入 \n 时不再 word-wrap，防止密码区等二次折行 */
     wrap:           'none' as const,
     ellipsis:       false,
     fill:           element.color    ?? '#000000',
     stroke:         isSelected ? '#1a73e8' : undefined,
     strokeWidth:    isSelected ? 0.5 : 0,
   }
-  return isVertical && wPx > 0 ? { ...baseCfg, width: wPx } : baseCfg
+  /** 竖排/密码区绑外接框尺寸以便 verticalAlign 居中 */
+  if (isVertical && wPx > 0) return { ...baseCfg, width: wPx }
+  if (isPasswordGrid && wPx > 0 && hPx > 0) return { ...baseCfg, width: wPx, height: hPx }
+  return baseCfg
 }
 
 function getPathConfig(element: ElementData) {
@@ -1081,6 +1334,8 @@ function getImageConfig(element: ElementData) {
     width:       s(element.width),
     height:      s(element.height),
     rotation:    element.rotation ?? 0,
+    scaleX:      element.scaleX ?? 1,
+    scaleY:      element.scaleY ?? 1,
     draggable:   !store.isAnnotationTool,
     image:       imageMap[element.id],
     stroke:      isSelected ? '#1a73e8' : undefined,

@@ -40,6 +40,9 @@ export const useEditorStore = defineStore('editor', () => {
     const annotationOpacity = ref(0.5)
     const annotationLineWidth = ref(2)
 
+    /** 待放置的图章图片（data URL），选择图片后点击页面放置 */
+    const pendingStampImage = ref<string | null>(null)
+
     // ==================== 计算属性 ====================
     const currentPage = computed<PageData | null>(() =>
         document.value?.pages[currentPageIndex.value] ?? null
@@ -71,6 +74,8 @@ export const useEditorStore = defineStore('editor', () => {
     })
 
     const isAnnotationTool = computed(() => currentTool.value !== 'SELECT')
+
+    const hasPendingStamp = computed(() => !!pendingStampImage.value)
 
     // ==================== 原有方法 ====================
     function ensurePageIds() {
@@ -156,6 +161,86 @@ export const useEditorStore = defineStore('editor', () => {
         return `${prefix}-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`
     }
 
+    /** mm 与屏幕像素换算（96dpi） */
+    const MM_TO_PX = 96 / 25.4
+
+    /**
+     * 将本地图片导入当前页，作为可编辑 IMAGE 元素。
+     * 尺寸按像素换算为 mm，过大时缩放到页内 85% 以内并居中放置。
+     */
+    async function importImageToPage(pageIndex: number, file: File): Promise<string | null> {
+        if (!document.value) return null
+        const page = document.value.pages[pageIndex]
+        if (!page) return null
+
+        if (!file.type.startsWith('image/')) {
+            throw new Error('请选择图片文件（PNG、JPEG、GIF、WebP 等）')
+        }
+
+        const dataUrl = await readFileAsDataUrl(file)
+        const { width: pxW, height: pxH } = await loadImageDimensions(dataUrl)
+
+        let wMm = pxW / MM_TO_PX
+        let hMm = pxH / MM_TO_PX
+        const maxW = page.width * 0.85
+        const maxH = page.height * 0.85
+        if (wMm > maxW || hMm > maxH) {
+            const scale = Math.min(maxW / wMm, maxH / hMm)
+            wMm *= scale
+            hMm *= scale
+        }
+
+        const x = Math.max(0, (page.width - wMm) / 2)
+        const y = Math.max(0, (page.height - hMm) / 2)
+        const id = newElementId('img', page.elements.length)
+
+        const element: ElementData = {
+            id,
+            type: 'IMAGE',
+            x,
+            y,
+            width: wMm,
+            height: hMm,
+            rotation: 0,
+            scaleX: 1,
+            scaleY: 1,
+            imageBase64: dataUrl,
+            imageData: dataUrl,
+            isNew: true,
+            isDirty: true,
+            originalX: x,
+            originalY: y,
+            originalWidth: wMm,
+            originalHeight: hMm,
+            originalRotation: 0,
+        }
+
+        page.elements.push(element)
+        selectedElementId.value = id
+        selectedAnnotationId.value = null
+        currentTool.value = 'SELECT'
+        saveToHistory()
+        return id
+    }
+
+    function readFileAsDataUrl(file: File): Promise<string> {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader()
+            reader.onload = () => resolve(String(reader.result))
+            reader.onerror = () => reject(new Error('读取图片失败'))
+            reader.readAsDataURL(file)
+        })
+    }
+
+    function loadImageDimensions(src: string): Promise<{ width: number; height: number }> {
+        return new Promise((resolve, reject) => {
+            const img = new Image()
+            img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight })
+            img.onerror = () => reject(new Error('无法解析图片'))
+            img.src = src
+        })
+    }
+
     function setDocument(doc: DocumentData) {
         if (doc.fileId) fileId.value = doc.fileId
         document.value = doc
@@ -163,6 +248,7 @@ export const useEditorStore = defineStore('editor', () => {
         currentPageIndex.value = 0
         selectedElementId.value = null
         selectedAnnotationId.value = null
+        pendingStampImage.value = null
         saveToHistory()
     }
 
@@ -222,8 +308,18 @@ export const useEditorStore = defineStore('editor', () => {
     function resetElement(pageIndex: number, elementId: string) {
         if (!document.value) return
         const page = document.value.pages[pageIndex]
-        const element = page?.elements.find((e) => e.id === elementId)
-        if (!element || !element.isDirty) return
+        const idx = page?.elements.findIndex((e) => e.id === elementId) ?? -1
+        if (idx === -1) return
+        const element = page!.elements[idx]
+
+        if (element.isNew) {
+            page!.elements.splice(idx, 1)
+            if (selectedElementId.value === elementId) selectedElementId.value = null
+            saveToHistory()
+            return
+        }
+
+        if (!element.isDirty) return
 
         element.x = element.originalX ?? element.x
         element.y = element.originalY ?? element.y
@@ -463,11 +559,40 @@ export const useEditorStore = defineStore('editor', () => {
         return { ...document.value, fileId: fileId.value ?? undefined }
     }
 
+    /** 保存成功后调用：避免再次保存时重复插入 isNew 图片 */
+    function markNewElementsPersisted() {
+        if (!document.value) return
+        for (const page of document.value.pages) {
+            for (const el of page.elements) {
+                if (!el.isNew) continue
+                el.isNew = false
+                el.originalX = el.x
+                el.originalY = el.y
+                el.originalWidth = el.width
+                el.originalHeight = el.height
+                el.originalRotation = el.rotation ?? 0
+                el.isDirty = false
+            }
+        }
+        saveToHistory()
+    }
+
     // ==================== 注释方法 ====================
     function setTool(tool: ToolType) {
         currentTool.value = tool
         selectedAnnotationId.value = null
         if (tool !== 'SELECT') selectedElementId.value = null
+    }
+
+    function setPendingStampImage(dataUrl: string) {
+        pendingStampImage.value = dataUrl
+        currentTool.value = 'STAMP'
+        selectedAnnotationId.value = null
+        selectedElementId.value = null
+    }
+
+    function clearPendingStampImage() {
+        pendingStampImage.value = null
     }
 
     function setAnnotationColor(color: string) {
@@ -603,6 +728,7 @@ export const useEditorStore = defineStore('editor', () => {
         // ── 注释状态 ──
         currentTool, annotationsMap, selectedAnnotationId,
         annotationColor, annotationOpacity, annotationLineWidth,
+        pendingStampImage, hasPendingStamp,
         // ── 原有计算属性 ──
         currentPage, selectedElement, canUndo, canRedo,
         // ── 注释计算属性 ──
@@ -610,12 +736,13 @@ export const useEditorStore = defineStore('editor', () => {
         // ── 原有方法 ──
         setDocument, setCurrentFile, setCurrentPage,
         selectElement, setScale, setLoading,
-        updateElement, resetElement,
+        updateElement, resetElement, importImageToPage,
         insertPage, deletePage, movePage, copyPage, reorderPages,
-        saveToHistory, undo, redo, getDocumentForSave,
+        saveToHistory, undo, redo, getDocumentForSave, markNewElementsPersisted,
         // ── 注释方法 ──
         setTool, setAnnotationColor, setAnnotationOpacity,
-        setAnnotationLineWidth, selectAnnotation,
+        setAnnotationLineWidth, setPendingStampImage, clearPendingStampImage,
+        selectAnnotation,
         addAnnotation, updateAnnotation, deleteAnnotation,
         loadAllAnnotations, getAnnotationsByPage,
         exportWithAnnotations,

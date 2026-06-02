@@ -44,6 +44,10 @@ export interface ElementData {
     italic?: boolean
     /** 是否为竖排文本：true 时 content 内已用 \n 拆字，前端不按外接框高度放大字号 */
     verticalLayout?: boolean
+    /** 密码区网格：后端已按 g N 切行，前端禁止二次 word-wrap */
+    passwordGrid?: boolean
+    /** OFD TextCode DeltaX 平均字距（mm） */
+    glyphAdvanceMm?: number
     rotation?: number
     scaleX?: number
     scaleY?: number
@@ -59,6 +63,8 @@ export interface ElementData {
     imageBase64?: string
     imageUrl?: string
     imageData?: string
+    /** 用户新插入的元素（如导入图片），保存时由后端追加到 OFD */
+    isNew?: boolean
     isDirty?: boolean
     /** 用户在属性面板手动改过字号；为 true 时前端不再按外接框高度自动 clamp 字号 */
     fontSizeOverridden?: boolean

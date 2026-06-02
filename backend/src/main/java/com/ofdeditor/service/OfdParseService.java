@@ -103,6 +103,8 @@ public class OfdParseService {
             Files.write(tempFile, ofdBytes);
 
             try (ZipFile zipFile = new ZipFile(tempFile.toFile())) {
+                Map<String, String> resourceMap = buildResourceMapForZip(zipFile);
+
                 // 扫描 ZIP 内所有 Annotation.xml 路径，自动发现页码
                 Enumeration<? extends ZipEntry> entries = zipFile.entries();
                 while (entries.hasMoreElements()) {
@@ -120,7 +122,7 @@ public class OfdParseService {
                     if (bytes == null || bytes.length == 0) continue;
 
                     List<AnnotationDTO> pageAnnotations =
-                            parseAnnotationXmlToDTO(bytes, pageIndex);
+                            parseAnnotationXmlToDTO(bytes, pageIndex, resourceMap);
 
                     if (!pageAnnotations.isEmpty()) {
                         result.put(pageIndex, pageAnnotations);
@@ -165,7 +167,96 @@ public class OfdParseService {
      * 解析单个 Annotation.xml 的字节流，返回该页的 AnnotationDTO 列表
      * 只使用 AnnotationDTO 中真实存在的字段
      */
-    private List<AnnotationDTO> parseAnnotationXmlToDTO(byte[] xmlBytes, int pageIndex) {
+    /**
+     * 为注释层图章解析建立 ResourceID → dataUrl 索引（与正文解析同源：Res/ + DocumentRes）
+     */
+    private Map<String, String> buildResourceMapForZip(ZipFile zip) {
+        Map<String, String> map = new HashMap<>();
+        try {
+            String ofdXmlPath = findEntryIgnoreCase(zip, "OFD.xml");
+            if (ofdXmlPath == null) return map;
+
+            Document ofdDoc = parseXml(zip, ofdXmlPath);
+            String docRoot = getFirstTextByLocalName(ofdDoc.getDocumentElement(), "DocRoot");
+            if (!isNotBlank(docRoot)) return map;
+            docRoot = normalizePath(docRoot);
+
+            String documentXmlPath = resolvePath(docRoot, "Document.xml");
+            if (zip.getEntry(documentXmlPath) == null) {
+                documentXmlPath = findEntryEndsWithIgnoreCase(zip, "/" + docRoot + "/Document.xml");
+                if (documentXmlPath == null) {
+                    documentXmlPath = findEntryEndsWithIgnoreCase(zip, "Document.xml");
+                }
+            }
+            if (documentXmlPath == null) return map;
+
+            Document documentDoc = parseXml(zip, documentXmlPath);
+            Element docRootElem = documentDoc.getDocumentElement();
+
+            List<String> resXmlPaths = new ArrayList<>();
+            for (String tag : new String[]{"PublicRes", "DocumentRes"}) {
+                for (String v : getAllTextByLocalName(docRootElem, tag)) {
+                    if (isNotBlank(v)) {
+                        resXmlPaths.add(resolvePath(parentDir(documentXmlPath), normalizePath(v.trim())));
+                    }
+                }
+            }
+
+            for (String resXml0 : new HashSet<>(resXmlPaths)) {
+                String resXml = resXml0;
+                if (zip.getEntry(resXml) == null) {
+                    String fallback = findEntryEndsWithIgnoreCase(zip, "/" + filename(resXml));
+                    if (fallback == null) continue;
+                    resXml = fallback;
+                }
+                Document resDoc = parseXml(zip, resXml);
+                Element resRoot = resDoc.getDocumentElement();
+
+                NodeList mediaNodes = resRoot.getElementsByTagNameNS("*", "MultiMedia");
+                if (mediaNodes.getLength() == 0) {
+                    mediaNodes = resRoot.getElementsByTagName("MultiMedia");
+                }
+
+                for (int i = 0; i < mediaNodes.getLength(); i++) {
+                    Node n = mediaNodes.item(i);
+                    if (!(n instanceof Element mm)) continue;
+
+                    String id = firstNonBlank(mm.getAttribute("ID"),
+                            mm.getAttribute("Id"), mm.getAttribute("id"));
+                    if (!isNotBlank(id)) continue;
+
+                    String mediaFile = getFirstTextByLocalName(mm, "MediaFile");
+                    if (!isNotBlank(mediaFile)) continue;
+
+                    mediaFile = normalizePath(mediaFile.trim());
+                    String mediaPath = resolvePath(parentDir(resXml), mediaFile);
+
+                    ZipEntry mediaEntry = zip.getEntry(mediaPath);
+                    if (mediaEntry == null) {
+                        String fallback = findEntryEndsWithIgnoreCase(zip, "/" + filename(mediaPath));
+                        if (fallback == null) continue;
+                        mediaPath = fallback;
+                        mediaEntry = zip.getEntry(mediaPath);
+                    }
+                    if (mediaEntry == null) continue;
+
+                    byte[] bytes = readAllBytes(zip, mediaEntry);
+                    if (bytes == null || bytes.length == 0) continue;
+
+                    String dataUrl = toBrowserSafeDataUrl(mediaPath, bytes);
+                    if (isNotBlank(dataUrl)) {
+                        map.putIfAbsent(id.trim(), dataUrl);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.warn("注释图章资源索引失败: {}", e.getMessage());
+        }
+        return map;
+    }
+
+    private List<AnnotationDTO> parseAnnotationXmlToDTO(byte[] xmlBytes, int pageIndex,
+                                                        Map<String, String> resourceMap) {
         List<AnnotationDTO> list = new ArrayList<>();
         try {
             Document doc = parseXmlBytes(xmlBytes);
@@ -197,8 +288,18 @@ public class OfdParseService {
                 dto.setCreatedAt(System.currentTimeMillis());
                 dto.setUpdatedAt(dto.getCreatedAt());
 
-                // stampBase64 此处暂无资源上下文，保持 null
-                // OfdController 可在后续结合 resourceDataUrlById 补充
+                String resourceId = firstNonBlank(
+                        el.getAttribute("ResourceID"),
+                        el.getAttribute("ResourceId"),
+                        el.getAttribute("ResID")
+                );
+                if (isNotBlank(resourceId) && resourceMap != null) {
+                    String dataUrl = resourceMap.get(resourceId.trim());
+                    if (isNotBlank(dataUrl)) {
+                        dto.setStampBase64(dataUrl);
+                    }
+                }
+
                 list.add(dto);
             }
 
@@ -396,29 +497,38 @@ public class OfdParseService {
 
         List<ElementDTO> elements = new ArrayList<>();
         try {
-            // 正文 TextObject 的填充色以 Content.xml 为准；ofdrw 反射常拿不到 → 易被当成黑字。
-            indexTextObjectFillColorsForPage(pageIndex, ctx);
+            // 正文/模板 TextObject、PathObject 以 XML 为准（坐标），供 ofdrw 解析结果覆盖
+            indexPageDomObjectsForPage(pageIndex, ctx);
 
-            List<Object> roots = new ArrayList<>();
-
-            // 1. 模板层（表格线、背景文字等）—— 直接从ZIP读
-            parseTemplateLayer(pageIndex, roots, ctx);
-
-            // 2a. 正文层 Content.xml 中的 PathObject / ImageObject（在 ofdrw 之前加入，保证叠放顺序：底图/矢量在下）
-            // 蓝底、色块等通常是全页 PathObject 填充，不是位图；仅补 Image 无法显示背景。
-            addPageGraphicsDomRootsFromContentXml(pageIndex, roots, ctx);
-
-            // 2b. 正文层 ofdrw
+            List<Object> ofdrwRoots = new ArrayList<>();
             Object pageObj = reader.getPage(pageNum);
-            roots.add(pageObj);
-            addIfNotNull(roots, invokeAny(pageObj,
+            ofdrwRoots.add(pageObj);
+            addIfNotNull(ofdrwRoots, invokeAny(pageObj,
                     "getLayer", "getLayers", "getContent", "getPageBlock"));
 
-            // 3. 注释层（印章等）
-            parseAnnotations(pageNum, elements, ctx);
+            List<Object> underlayRoots = new ArrayList<>();
+            parseTemplateLayer(pageIndex, underlayRoots, ctx);
+            addPageGraphicsDomRootsFromContentXml(pageIndex, underlayRoots, ctx);
 
-            // 4. 统一遍历所有roots
-            collectFromRoots(roots, elements, ctx);
+            // 先解析 ofdrw 正文（Text/Image 坐标权威来源），再补模板/DOM 矢量底图
+            Set<String> semanticSeen = new LinkedHashSet<>();
+            List<ElementDTO> foreground = new ArrayList<>();
+            collectFromRoots(ofdrwRoots, foreground, ctx, semanticSeen);
+
+            List<ElementDTO> background = new ArrayList<>();
+            collectPathsFromRoots(underlayRoots, background, ctx, semanticSeen);
+
+            List<ElementDTO> supplementText = new ArrayList<>();
+            collectSupplementTextFromRoots(underlayRoots, supplementText, ctx, semanticSeen);
+
+            elements.addAll(background);
+            elements.addAll(foreground);
+            elements.addAll(supplementText);
+
+            adjustCurrencyTextLayout(elements);
+
+            // 注释层（印章等）
+            parseAnnotations(pageNum, elements, ctx);
 
         } catch (Exception e) {
             log.warn("解析第{}页内容失败: {}", pageNum, e.getMessage());
@@ -511,8 +621,9 @@ public class OfdParseService {
     }
 
     /**
-     * 从当前页 {@code Content.xml} 按文档顺序收集 {@code PathObject} 与 {@code ImageObject}（及 CT 变体）DOM，
-     * 供 {@link #walk} → {@link #parseBlockFromDom} 解析。不含 {@code TextObject}，避免与 ofdrw 文本重复。
+     * 从当前页 {@code Content.xml} 按文档顺序收集 {@code PathObject}（及 CT 变体）DOM，
+     * 供 {@link #walk} → {@link #parseBlockFromDom} 解析。不含 {@code TextObject}（避免与 ofdrw 文本重复），
+     * 也不含 {@code ImageObject}（由 ofdrw 解析，避免 PDF 转 OFD 等同 ResourceID 叠图）。
      * <p>常见“整页蓝底/底色”是首个 {@code PathObject} 矢量填充，不是图片位图；厂商 OFD 在 ofdrw 中常缺失这些节点。</p>
      */
     private void addPageGraphicsDomRootsFromContentXml(int pageIndex, List<Object> roots, ParseContext ctx) {
@@ -532,17 +643,16 @@ public class OfdParseService {
             for (Object o : ordered) {
                 roots.add(o);
             }
-            log.info("【正文XML】第{}页 {} 加入 Path/Image 根节点: {} 个", pageIndex, pageContentPath, ordered.size());
+            log.info("【正文XML】第{}页 {} 加入 Path 根节点: {} 个", pageIndex, pageContentPath, ordered.size());
         } catch (Exception e) {
             log.debug("addPageGraphicsDomRootsFromContentXml: {}", e.getMessage());
         }
     }
 
-    /** 深度优先、与 Content.xml 中出现顺序一致，只收集 PathObject / ImageObject（及 CT_Path、CT_Image）。 */
+    /** 深度优先、与 Content.xml 中出现顺序一致，只收集 PathObject（及 CT_Path）。 */
     private void collectPathAndImageDomInDocOrder(Element el, List<Object> out) {
         String local = elementLocalName(el);
-        if ("PathObject".equals(local) || "ImageObject".equals(local)
-                || "CT_Path".equals(local) || "CT_Image".equals(local)) {
+        if ("PathObject".equals(local) || "CT_Path".equals(local)) {
             out.add(el);
         }
         NodeList children = el.getChildNodes();
@@ -565,45 +675,520 @@ public class OfdParseService {
     }
 
     /**
-     * 遍历当前页 Content.xml，建立 {@code TextObject ID → #RRGGBB}，供 ofdrw 路径按 xmlObjId 覆盖 {@link ElementDTO#setColor}。
+     * 索引当前页 Content.xml 及引用模板中的 TextObject / PathObject。
      */
-    private void indexTextObjectFillColorsForPage(int pageIndex, ParseContext ctx) {
+    private void indexPageDomObjectsForPage(int pageIndex, ParseContext ctx) {
         ctx.textFillHexByObjectIdPage.clear();
+        ctx.textDomByObjectIdPage.clear();
+        ctx.pathDomByObjectIdPage.clear();
         if (ctx.zipFile == null) return;
         try {
             String pageContentPath = findPageContentPath(ctx.zipFile, pageIndex);
             if (pageContentPath == null) return;
             byte[] pageBytes = readZipEntry(ctx.zipFile, pageContentPath);
             if (pageBytes == null || pageBytes.length == 0) return;
-            Document doc = parseXmlBytes(pageBytes);
-            Element top = doc.getDocumentElement();
-            if (top == null) return;
-            indexTextObjectFillColorsRecursive(top, ctx);
+
+            indexDomObjectsInXmlBytes(pageBytes, ctx);
+
+            List<String> templateIds = extractTemplateIdsFromPage(pageBytes);
+            if (!templateIds.isEmpty()) {
+                Map<String, String> tplIdToPath = loadTemplatePagePaths(ctx.zipFile);
+                for (String tplId : templateIds) {
+                    String tplPath = tplIdToPath.get(tplId);
+                    if (tplPath == null && tplIdToPath.size() == 1) {
+                        tplPath = tplIdToPath.values().iterator().next();
+                    }
+                    if (tplPath == null) continue;
+                    byte[] tplBytes = readZipEntry(ctx.zipFile, tplPath);
+                    if (tplBytes != null) indexDomObjectsInXmlBytes(tplBytes, ctx);
+                }
+            }
         } catch (Exception e) {
-            log.debug("indexTextObjectFillColorsForPage page={}: {}", pageIndex, e.getMessage());
+            log.debug("indexPageDomObjectsForPage page={}: {}", pageIndex, e.getMessage());
         }
     }
 
-    private void indexTextObjectFillColorsRecursive(Element el, ParseContext ctx) {
+    private void indexDomObjectsInXmlBytes(byte[] xmlBytes, ParseContext ctx) {
+        try {
+            Document doc = parseXmlBytes(xmlBytes);
+            Element top = doc.getDocumentElement();
+            if (top == null) return;
+            indexDomObjectsRecursive(top, ctx);
+        } catch (Exception e) {
+            log.debug("indexDomObjectsInXmlBytes: {}", e.getMessage());
+        }
+    }
+
+    private void indexDomObjectsRecursive(Element el, ParseContext ctx) {
         String local = elementLocalName(el);
         if ("TextObject".equals(local) || "CT_Text".equals(local)) {
-            String oid = firstNonBlank(
-                    el.getAttribute("ID"),
-                    el.getAttribute("Id"),
-                    el.getAttribute("id"),
-                    el.getAttribute("ObjID"),
-                    el.getAttribute("ObjectID"));
-            if (isNotBlank(oid)) {
-                String hex = extractTextFillColorHexFromElement(el);
-                if (isNotBlank(hex))
-                    ctx.textFillHexByObjectIdPage.put(oid.trim(), hex);
-            }
+            indexOneTextObjectFromDom(el, ctx);
+        } else if ("PathObject".equals(local) || "CT_Path".equals(local)) {
+            indexOnePathObjectFromDom(el, ctx);
         }
         NodeList children = el.getChildNodes();
         for (int i = 0; i < children.getLength(); i++) {
             Node c = children.item(i);
-            if (c instanceof Element) indexTextObjectFillColorsRecursive((Element) c, ctx);
+            if (c instanceof Element child) indexDomObjectsRecursive(child, ctx);
         }
+    }
+
+    private void indexOnePathObjectFromDom(Element el, ParseContext ctx) {
+        String oid = firstNonBlank(
+                el.getAttribute("ID"), el.getAttribute("Id"), el.getAttribute("id"),
+                el.getAttribute("ObjID"), el.getAttribute("ObjectID"));
+        if (!isNotBlank(oid)) return;
+        List<Double> nums = extractNumbers(el.getAttribute("Boundary"));
+        if (nums.size() < 4) return;
+        PathObjectDomInfo info = new PathObjectDomInfo();
+        info.x = nums.get(0);
+        info.y = nums.get(1);
+        info.w = nums.get(2);
+        info.h = nums.get(3);
+        NodeList abbrevNodes = el.getElementsByTagNameNS("*", "AbbreviatedData");
+        if (abbrevNodes.getLength() == 0) abbrevNodes = el.getElementsByTagName("AbbreviatedData");
+        if (abbrevNodes.getLength() > 0) {
+            String raw = abbrevNodes.item(0).getTextContent();
+            if (isNotBlank(raw)) info.abbrevData = raw.trim();
+        }
+        info.ctmStr = firstNonBlank(el.getAttribute("CTM"), el.getAttribute("ctm"));
+        ctx.pathDomByObjectIdPage.put(oid.trim(), info);
+    }
+
+    /** ofdrw Path 解析后，用 XML Boundary + AbbreviatedData 校正图案位置 */
+    private void applyPathDomOverrides(ElementDTO dto, ParseContext ctx) {
+        if (dto == null || ctx == null || !"PATH".equals(dto.getType())) return;
+        if (!isNotBlank(dto.getXmlObjId())) return;
+        PathObjectDomInfo dom = ctx.pathDomByObjectIdPage.get(dto.getXmlObjId().trim());
+        if (dom == null || dom.x == null || dom.y == null) return;
+        dto.setX(dom.x);
+        dto.setY(dom.y);
+        if (dom.w != null && dom.w > 0) dto.setWidth(dom.w);
+        if (dom.h != null && dom.h > 0) dto.setHeight(dom.h);
+        if (isNotBlank(dom.abbrevData)) {
+            Matrix ctm = parseCTMString(dom.ctmStr);
+            dto.setPathData(convertOfdPathToSvg(dom.abbrevData, dom.x, dom.y, ctm));
+        }
+    }
+
+    private void indexOneTextObjectFromDom(Element el, ParseContext ctx) {
+        String oid = firstNonBlank(
+                el.getAttribute("ID"), el.getAttribute("Id"), el.getAttribute("id"),
+                el.getAttribute("ObjID"), el.getAttribute("ObjectID"));
+        if (!isNotBlank(oid)) return;
+
+        List<Double> nums = extractNumbers(el.getAttribute("Boundary"));
+        if (nums.size() < 4) return;
+
+        TextCodeParseResult parsed = parseTextCodesFromDomElement(el);
+
+        TextObjectDomInfo info = new TextObjectDomInfo();
+        info.boundaryX = nums.get(0);
+        info.boundaryY = nums.get(1);
+        info.w = nums.get(2);
+        info.h = nums.get(3);
+        info.content = parsed.content;
+        info.verticalLayout = parsed.verticalLayout ? Boolean.TRUE : null;
+
+        Element firstTc = getFirstTextCodeElement(el);
+        String dx = firstTc != null ? firstTc.getAttribute("DeltaX") : null;
+        String dy = firstTc != null ? firstTc.getAttribute("DeltaY") : null;
+        info.passwordGrid = isPasswordGridLayout(dx, dy, parsed.content);
+        info.preferDomGeometry = parsed.verticalLayout || info.passwordGrid;
+
+        double[] off = getFirstTextCodeOffsetFromDom(el);
+        info.tcOffX = off != null ? off[0] : 0.0;
+        info.tcOffY = off != null ? off[1] : 0.0;
+        Double adv = resolveGlyphAdvanceMm(dx);
+        String plainContent = parsed.content != null ? parsed.content.replace("\n", "").trim() : "";
+        if (adv != null && adv > 0 && isCurrencyLikeContent(plainContent)) {
+            info.glyphAdvanceMm = adv;
+        }
+
+        double fontSize = 12.0;
+        Double s = tryParseDouble(el.getAttribute("Size"));
+        if (s != null && s > 0) fontSize = s;
+        Matrix ctm = parseCTMString(firstNonBlank(el.getAttribute("CTM"), el.getAttribute("ctm")));
+        if (ctm != null) {
+            double scaleY = Math.sqrt(ctm.b * ctm.b + ctm.d * ctm.d);
+            if (Double.isFinite(scaleY) && scaleY > 0.0001) fontSize *= scaleY;
+        }
+        info.fontSize = fontSize;
+
+        String hex = extractTextFillColorHexFromElement(el);
+        if (isNotBlank(hex)) ctx.textFillHexByObjectIdPage.put(oid.trim(), hex);
+        ctx.textDomByObjectIdPage.put(oid.trim(), info);
+    }
+
+    /** ofdrw 解析后，用 XML 索引覆盖坐标/换行/字号（仅竖排标签、密码区等需 XML 几何的场景） */
+    private void applyTextDomOverrides(ElementDTO dto, ParseContext ctx) {
+        if (dto == null || ctx == null || !"TEXT".equals(dto.getType())) return;
+        if (!isNotBlank(dto.getXmlObjId())) return;
+        TextObjectDomInfo dom = ctx.textDomByObjectIdPage.get(dto.getXmlObjId().trim());
+        if (dom == null) return;
+        if (Boolean.TRUE.equals(dom.preferDomGeometry)) {
+            double bx = dom.boundaryX != null ? dom.boundaryX : 0;
+            double by = dom.boundaryY != null ? dom.boundaryY : 0;
+            double tcx = dom.tcOffX != null ? dom.tcOffX : 0;
+            double tcy = dom.tcOffY != null ? dom.tcOffY : 0;
+            double fs = dom.fontSize != null && dom.fontSize > 0 ? dom.fontSize : 3.175;
+            boolean vert = Boolean.TRUE.equals(dom.verticalLayout);
+            boolean pwd = Boolean.TRUE.equals(dom.passwordGrid);
+            dto.setX(applyTextOriginX(bx, tcx, vert, pwd));
+            dto.setY(computeKonvaTextY(by, tcy, fs, vert, pwd));
+            if (dom.w != null && dom.w > 0) dto.setWidth(dom.w);
+            if (dom.h != null && dom.h > 0) dto.setHeight(dom.h);
+            if (isNotBlank(dom.content)) dto.setContent(dom.content);
+            if (dom.verticalLayout != null) dto.setVerticalLayout(dom.verticalLayout);
+            if (dom.passwordGrid != null) dto.setPasswordGrid(dom.passwordGrid);
+            if (dom.fontSize != null && dom.fontSize > 0) dto.setFontSize(dom.fontSize);
+        } else {
+            double bx = dom.boundaryX != null ? dom.boundaryX : (dto.getX() != null ? dto.getX() : 0.0);
+            double by = dom.boundaryY != null ? dom.boundaryY : (dto.getY() != null ? dto.getY() : 0.0);
+            double tcx = dom.tcOffX != null ? dom.tcOffX : 0;
+            double tcy = dom.tcOffY != null ? dom.tcOffY : 0;
+            double fs = dto.getFontSize() != null && dto.getFontSize() > 0 ? dto.getFontSize() : 3.175;
+            boolean vert = Boolean.TRUE.equals(dto.getVerticalLayout());
+            boolean pwd = Boolean.TRUE.equals(dom.passwordGrid);
+            String domPlain = isNotBlank(dom.content) ? dom.content.replace("\n", "").trim() : "";
+            boolean currency = isCurrencyLikeContent(
+                    isNotBlank(domPlain) ? domPlain : dto.getContent());
+            if (currency) {
+                dto.setX(bx + tcx);
+                dto.setY(computeKonvaTextY(by, tcy, fs, false, false));
+                if (isNotBlank(domPlain)) dto.setContent(domPlain);
+                dto.setPasswordGrid(null);
+            } else {
+                dto.setX(pwd ? applyTextOriginX(bx, tcx, false, true) : bx);
+                dto.setY(computeKonvaTextY(by, tcy, fs, vert, pwd));
+                if (pwd) dto.setPasswordGrid(true);
+                if (isNotBlank(dom.content) && dom.content.contains("\n")
+                        && (dto.getContent() == null || !dto.getContent().contains("\n"))) {
+                    dto.setContent(dom.content);
+                }
+            }
+        }
+        String hex = ctx.textFillHexByObjectIdPage.get(dto.getXmlObjId().trim());
+        if (isNotBlank(hex)) dto.setColor(hex);
+        if (dom.glyphAdvanceMm != null && dom.glyphAdvanceMm > 0
+                && isCurrencyLikeContent(dto.getContent())) {
+            dto.setGlyphAdvanceMm(dom.glyphAdvanceMm);
+        }
+    }
+
+    /** 金额行：¥ 开头或末尾带 ¥+数字（如 (小写)¥526.00） */
+    private boolean isCurrencyLikeContent(String text) {
+        if (!isNotBlank(text)) return false;
+        String t = text.trim();
+        if (t.matches("^[¥￥\\u00a5\\uffe5][\\d.,]+$")) return true;
+        return t.matches(".*[¥￥\\u00a5\\uffe5][\\d.,]+$") && t.length() <= 24;
+    }
+
+    private boolean isOnlyCurrencySymbol(String text) {
+        if (!isNotBlank(text)) return false;
+        String t = text.trim();
+        return "¥".equals(t) || "￥".equals(t) || "\u00a5".equals(t) || "\uffe5".equals(t);
+    }
+
+    private boolean isPlainAmountText(String text) {
+        if (!isNotBlank(text)) return false;
+        return text.trim().matches("^[\\d.,]+$");
+    }
+
+    /**
+     * 发票金额常见为「¥」与数字分两个 TextObject。合并为单条供前端分段渲染，避免 Web 字体 ¥ 过宽叠字。
+     */
+    private void adjustCurrencyTextLayout(List<ElementDTO> elements) {
+        if (elements == null || elements.isEmpty()) return;
+        List<ElementDTO> remove = new ArrayList<>();
+        for (ElementDTO sym : elements) {
+            if (!"TEXT".equals(sym.getType()) || !isOnlyCurrencySymbol(sym.getContent())) continue;
+            Double symY = sym.getY();
+            Double symX = sym.getX();
+            double fs = sym.getFontSize() != null && sym.getFontSize() > 0 ? sym.getFontSize() : 3.175;
+            if (symY == null || symX == null) continue;
+            ElementDTO best = null;
+            double bestDx = Double.MAX_VALUE;
+            for (ElementDTO amt : elements) {
+                if (amt == sym || remove.contains(amt) || !"TEXT".equals(amt.getType())) continue;
+                if (!isPlainAmountText(amt.getContent())) continue;
+                Double ay = amt.getY();
+                Double ax = amt.getX();
+                if (ay == null || ax == null) continue;
+                if (Math.abs(ay - symY) > fs * 0.85) continue;
+                double dx = ax - symX;
+                if (dx >= -0.2 && dx < fs * 1.2 && dx < bestDx) {
+                    bestDx = dx;
+                    best = amt;
+                }
+            }
+            if (best != null) {
+                sym.setContent(sym.getContent().trim() + best.getContent().trim());
+                remove.add(best);
+            }
+        }
+        elements.removeAll(remove);
+    }
+
+    private static class TextCodeParseResult {
+        final String content;
+        final boolean verticalLayout;
+        TextCodeParseResult(String content, boolean verticalLayout) {
+            this.content = content;
+            this.verticalLayout = verticalLayout;
+        }
+    }
+
+    /** 解析 TextObject 下多个 TextCode：竖排单字 / 密码区多行 / 横向拼接 */
+    private TextCodeParseResult parseTextCodesFromDomElement(Element textObj) {
+        StringBuilder sb = new StringBuilder();
+        boolean verticalLayout = false;
+        NodeList tcNodes = textObj.getElementsByTagNameNS("*", "TextCode");
+        if (tcNodes.getLength() == 0) tcNodes = textObj.getElementsByTagName("TextCode");
+        int tcCount = tcNodes.getLength();
+        Double prevY = null;
+
+        for (int i = 0; i < tcCount; i++) {
+            Node n = tcNodes.item(i);
+            if (!(n instanceof Element tc)) continue;
+            String text = tc.getTextContent();
+            if (!isNotBlank(text)) continue;
+            String trimmed = text.trim();
+
+            Double tcY = tryParseDouble(firstNonBlank(tc.getAttribute("Y"), tc.getAttribute("y")));
+
+            String deltaXAttr = tc.getAttribute("DeltaX");
+            String deltaYAttr = tc.getAttribute("DeltaY");
+            if (isVerticalCharLayout(deltaXAttr, deltaYAttr, trimmed)) {
+                verticalLayout = true;
+                if (sb.length() > 0 && sb.charAt(sb.length() - 1) != '\n') sb.append('\n');
+                for (int k = 0; k < trimmed.length(); k++) {
+                    if (k > 0) sb.append('\n');
+                    sb.append(trimmed.charAt(k));
+                }
+            } else {
+                if (sb.length() > 0 && shouldStartNewTextLine(tcCount, prevY, tcY)) {
+                    sb.append('\n');
+                }
+                sb.append(applyGridLineBreaks(trimmed, deltaXAttr, deltaYAttr));
+                if (tcY != null) prevY = tcY;
+            }
+        }
+        return new TextCodeParseResult(sb.toString(), verticalLayout);
+    }
+
+    private TextCodeParseResult parseTextCodesFromOfdrw(Object textObj) {
+        StringBuilder sb = new StringBuilder();
+        boolean verticalLayout = false;
+        Double prevY = null;
+        Object textCodes = invokeAny(textObj, "getTextCode", "getTextCodes");
+        List<?> tcList = textCodes instanceof List<?> ? (List<?>) textCodes : List.of();
+        int tcCount = tcList.size();
+
+        for (Object tc : tcList) {
+            Object content = invokeAny(tc, "getContent", "getText", "getValue");
+            if (content == null) continue;
+            String text = String.valueOf(content);
+            if (!isNotBlank(text)) continue;
+            String trimmed = text.trim();
+
+            Double tcY = invokeDoubleAny(tc, "getY", "gety");
+
+            String deltaXAttr = invokeStringAny(tc, "getDeltaX");
+            String deltaYAttr = invokeStringAny(tc, "getDeltaY");
+            if (isVerticalCharLayout(deltaXAttr, deltaYAttr, trimmed)) {
+                verticalLayout = true;
+                if (sb.length() > 0 && sb.charAt(sb.length() - 1) != '\n') sb.append('\n');
+                for (int k = 0; k < trimmed.length(); k++) {
+                    if (k > 0) sb.append('\n');
+                    sb.append(trimmed.charAt(k));
+                }
+            } else {
+                if (sb.length() > 0 && shouldStartNewTextLine(tcCount, prevY, tcY)) {
+                    sb.append('\n');
+                }
+                sb.append(applyGridLineBreaks(trimmed, deltaXAttr, deltaYAttr));
+                if (tcY != null) prevY = tcY;
+            }
+        }
+        return new TextCodeParseResult(sb.toString(), verticalLayout);
+    }
+
+    /** 竖排单字：仅有 DeltaY、无 DeltaX/g 语法，且非密码区网格排版 */
+    private boolean isVerticalCharLayout(String deltaX, String deltaY, String text) {
+        if (!isNotBlank(text) || text.length() <= 1) return false;
+        if (hasDeltaGNotation(deltaX, deltaY)) return false;
+        List<Double> dy = extractNumbers(deltaY);
+        List<Double> dx = extractNumbers(deltaX);
+        boolean hasDy = dy.stream().anyMatch(v -> Math.abs(v) > 0.01);
+        boolean hasDx = dx.stream().anyMatch(v -> Math.abs(v) > 0.01);
+        return hasDy && !hasDx;
+    }
+
+    /** TextCode DeltaX 正数均值（mm），用于金额等逐字排版 */
+    private Double averagePositiveDeltaX(String deltaX) {
+        if (!isNotBlank(deltaX) || deltaX.contains("g ")) return null;
+        List<Double> nums = extractNumbers(deltaX);
+        if (nums.isEmpty()) return null;
+        double sum = 0;
+        int n = 0;
+        for (Double v : nums) {
+            if (v != null && v > 0.05 && v < 30) {
+                sum += v;
+                n++;
+            }
+        }
+        return n > 0 ? sum / n : null;
+    }
+
+    /** 从 {@code g N advance ...} 语法提取首字间距（发票金额常见） */
+    private Double firstPositiveAdvanceFromDeltaG(String deltaX) {
+        if (!isNotBlank(deltaX) || !deltaX.contains("g ")) return null;
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("(?i)g\\s+\\d+\\s+([+-]?\\d+(?:\\.\\d+)?)")
+                .matcher(deltaX.trim());
+        while (m.find()) {
+            try {
+                double v = Double.parseDouble(m.group(1));
+                if (v > 0.05 && v < 30) return v;
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return null;
+    }
+
+    private Double resolveGlyphAdvanceMm(String deltaX) {
+        Double fromG = firstPositiveAdvanceFromDeltaG(deltaX);
+        if (fromG != null) return fromG;
+        return averagePositiveDeltaX(deltaX);
+    }
+
+    private boolean hasDeltaGNotation(String deltaX, String deltaY) {
+        return (isNotBlank(deltaX) && deltaX.contains("g "))
+                || (isNotBlank(deltaY) && deltaY.contains("g "));
+    }
+
+    /** OFD {@code g N} 语法：单个 TextCode 内按 N 字换行（密码区等） */
+    private Integer detectCharsPerLineFromDeltaG(String deltaAttr) {
+        if (!isNotBlank(deltaAttr)) return null;
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("(?i)g\\s+(\\d+)").matcher(deltaAttr.trim());
+        if (!m.find()) return null;
+        try {
+            int n = Integer.parseInt(m.group(1));
+            return n > 1 ? n : null;
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private String applyGridLineBreaks(String text, String deltaX, String deltaY) {
+        if (!isPasswordGridLayout(deltaX, deltaY, text)) return text;
+        Integer cpl = detectCharsPerLineFromDeltaG(deltaX);
+        if (cpl == null) cpl = detectCharsPerLineFromDeltaG(deltaY);
+        if (cpl == null || text.length() <= cpl) return text;
+        int lineCount = Math.max(countDeltaGGroups(deltaX), countDeltaGGroups(deltaY));
+        if (lineCount >= 2) {
+            StringBuilder sb = new StringBuilder(text.length() + lineCount);
+            for (int line = 0; line < lineCount; line++) {
+                int start = line * cpl;
+                if (start >= text.length()) break;
+                if (line > 0) sb.append('\n');
+                int end = (line == lineCount - 1) ? text.length() : Math.min(start + cpl, text.length());
+                sb.append(text, start, end);
+            }
+            return sb.toString();
+        }
+        StringBuilder sb = new StringBuilder(text.length() + text.length() / cpl);
+        for (int i = 0; i < text.length(); i++) {
+            if (i > 0 && i % cpl == 0) sb.append('\n');
+            sb.append(text.charAt(i));
+        }
+        return sb.toString();
+    }
+
+    /** 密码区网格：DeltaX 多组 {@code g N} 重复 + 长文本；单行金额 {@code g 8} 不算密码区 */
+    private boolean isPasswordGridLayout(String deltaX, String deltaY, String text) {
+        if (!isNotBlank(text) || !hasDeltaGNotation(deltaX, deltaY)) return false;
+        String plain = text.replace("\n", "").trim();
+        if (isCurrencyLikeContent(plain)) return false;
+        Integer cpl = detectCharsPerLineFromDeltaG(deltaX);
+        if (cpl == null) cpl = detectCharsPerLineFromDeltaG(deltaY);
+        if (cpl == null || cpl < 8 || plain.length() <= cpl) return false;
+        boolean hasLineReset = isNotBlank(deltaX) && deltaX.matches(".*-\\d+(?:\\.\\d+)?.*");
+        int gx = countDeltaGGroups(deltaX);
+        if (hasLineReset && gx >= 2) return true;
+        return cpl >= 20 && plain.length() >= cpl * 2;
+    }
+
+    private int countDeltaGGroups(String delta) {
+        if (!isNotBlank(delta)) return 0;
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("(?i)g\\s+").matcher(delta);
+        int n = 0;
+        while (m.find()) n++;
+        return n;
+    }
+
+    /** 竖排/密码区叠加 TextCode.X；普通横向文本 ofdrw Boundary 已含水平定位 */
+    private double applyTextOriginX(double boundaryX, double tcOffX, boolean vertical, boolean passwordGrid) {
+        if (vertical || passwordGrid) return boundaryX + tcOffX;
+        return boundaryX;
+    }
+
+    /**
+     * OFD TextCode.Y 为基线参考点，Konva Text 的 y 为顶边：横向文本减去约 0.78×字号。
+     * 密码区从 Boundary 顶边垂直居中（前端配合 verticalAlign）。
+     */
+    private double computeKonvaTextY(double boundaryY, double tcOffY, double fontSizeMm,
+                                     boolean vertical, boolean passwordGrid) {
+        if (passwordGrid) return boundaryY;
+        if (vertical) return boundaryY + tcOffY;
+        if (tcOffY > 0.01) {
+            return boundaryY + tcOffY - fontSizeMm * 0.78;
+        }
+        return boundaryY;
+    }
+
+    /** TextCode 偏移：横向只调 Y，竖排/密码区调 X+Y */
+    private void applyTextCodeOriginOffset(ElementDTO dto, Element textObj) {
+        if (dto == null || textObj == null) return;
+        double[] off = getFirstTextCodeOffsetFromDom(textObj);
+        if (off == null) return;
+        Element tc = getFirstTextCodeElement(textObj);
+        String dx = tc != null ? tc.getAttribute("DeltaX") : null;
+        String dy = tc != null ? tc.getAttribute("DeltaY") : null;
+        boolean passwordGrid = isPasswordGridLayout(dx, dy, dto.getContent());
+        boolean vertical = Boolean.TRUE.equals(dto.getVerticalLayout());
+        double fs = dto.getFontSize() != null && dto.getFontSize() > 0 ? dto.getFontSize() : 3.175;
+        double baseX = dto.getX() == null ? 0 : dto.getX();
+        double baseY = dto.getY() == null ? 0 : dto.getY();
+        dto.setX(applyTextOriginX(baseX, off[0], vertical, passwordGrid));
+        dto.setY(computeKonvaTextY(baseY, off[1], fs, vertical, passwordGrid));
+        if (passwordGrid) dto.setPasswordGrid(true);
+    }
+
+    private double[] getFirstTextCodeOffsetFromDom(Element textObj) {
+        Element tc = getFirstTextCodeElement(textObj);
+        if (tc == null) return null;
+        Double tx = tryParseDouble(firstNonBlank(tc.getAttribute("X"), tc.getAttribute("x")));
+        Double ty = tryParseDouble(firstNonBlank(tc.getAttribute("Y"), tc.getAttribute("y")));
+        if (tx == null && ty == null) return null;
+        return new double[]{ tx == null ? 0.0 : tx, ty == null ? 0.0 : ty };
+    }
+
+    private Element getFirstTextCodeElement(Element textObj) {
+        if (textObj == null) return null;
+        NodeList tcNodes = textObj.getElementsByTagNameNS("*", "TextCode");
+        if (tcNodes.getLength() == 0) tcNodes = textObj.getElementsByTagName("TextCode");
+        if (tcNodes.getLength() == 0) return null;
+        Node n = tcNodes.item(0);
+        return (n instanceof Element el) ? el : null;
+    }
+
+    /** 多个 TextCode 时默认按行拼接（密码区）；Y 坐标差显著时也换行 */
+    private boolean shouldStartNewTextLine(int tcCount, Double prevY, Double tcY) {
+        if (tcCount <= 1) return false;
+        if (prevY != null && tcY != null) return Math.abs(tcY - prevY) > 0.2;
+        return true;
     }
 
     /** OFD {@code FillColor}：{@code Value}、子结点 {@code Color}、渐变 {@code Segment} 中的颜色。 */
@@ -962,10 +1547,116 @@ public class OfdParseService {
     // ==================== 元素遍历 ====================
 
     private void collectFromRoots(List<Object> roots, List<ElementDTO> elements, ParseContext ctx) {
+        collectFromRoots(roots, elements, ctx, new LinkedHashSet<>());
+    }
+
+    private void collectFromRoots(List<Object> roots, List<ElementDTO> elements,
+                                  ParseContext ctx, Set<String> semanticSeen) {
         Set<Integer> visited = new HashSet<>();
-        Set<String> semanticSeen = new HashSet<>();
         for (Object root : roots) {
             walk(root, elements, visited, semanticSeen, 0, ctx);
+        }
+    }
+
+    /** 仅从模板/DOM 收集 PathObject，避免模板 Text 与 ofdrw 重复叠层 */
+    private void collectPathsFromRoots(List<Object> roots, List<ElementDTO> elements,
+                                       ParseContext ctx, Set<String> semanticSeen) {
+        Set<Integer> visited = new HashSet<>();
+        for (Object root : roots) {
+            walkPathsOnly(root, elements, visited, semanticSeen, 0, ctx);
+        }
+    }
+
+    private void walkPathsOnly(Object node, List<ElementDTO> elements,
+                               Set<Integer> visited, Set<String> semanticSeen, int depth, ParseContext ctx) {
+        if (node == null || depth > 20) return;
+        int id = System.identityHashCode(node);
+        if (!visited.add(id)) return;
+
+        if (node instanceof Element el) {
+            String localName = elementLocalName(el);
+            if ("PathObject".equals(localName) || "CT_Path".equals(localName)) {
+                parseBlockFromDom(el, localName, elements, semanticSeen, ctx);
+                return;
+            }
+            NodeList children = el.getChildNodes();
+            for (int i = 0; i < children.getLength(); i++) {
+                Node child = children.item(i);
+                if (child instanceof Element) {
+                    walkPathsOnly(child, elements, visited, semanticSeen, depth + 1, ctx);
+                }
+            }
+            return;
+        }
+
+        String cn = node.getClass().getSimpleName();
+        if (cn.contains("Path")) {
+            parseBlock(node, elements, semanticSeen, ctx);
+            return;
+        }
+
+        Method[] methods = node.getClass().getMethods();
+        for (Method m : methods) {
+            try {
+                if (m.getParameterCount() != 0) continue;
+                String name = m.getName();
+                if (!(name.startsWith("get") || name.startsWith("is"))) continue;
+                if ("getClass".equals(name)) continue;
+
+                Object val = m.invoke(node);
+                if (val == null) continue;
+
+                if (val instanceof List<?>) {
+                    for (Object item : (List<?>) val) {
+                        walkPathsOnly(item, elements, visited, semanticSeen, depth + 1, ctx);
+                    }
+                } else if (val instanceof Map<?, ?>) {
+                    for (Object entryVal : ((Map<?, ?>) val).values()) {
+                        walkPathsOnly(entryVal, elements, visited, semanticSeen, depth + 1, ctx);
+                    }
+                } else if (!isJdkType(val.getClass())) {
+                    walkPathsOnly(val, elements, visited, semanticSeen, depth + 1, ctx);
+                }
+            } catch (Exception ignore) {
+            }
+        }
+    }
+
+    /** 模板/DOM 中 ofdrw 未覆盖的 TextObject（如仅存在于 Template 的标签） */
+    private void collectSupplementTextFromRoots(List<Object> roots, List<ElementDTO> elements,
+                                                ParseContext ctx, Set<String> semanticSeen) {
+        Set<Integer> visited = new HashSet<>();
+        for (Object root : roots) {
+            walkSupplementTextOnly(root, elements, visited, semanticSeen, 0, ctx);
+        }
+    }
+
+    private void walkSupplementTextOnly(Object node, List<ElementDTO> elements,
+                                        Set<Integer> visited, Set<String> semanticSeen,
+                                        int depth, ParseContext ctx) {
+        if (node == null || depth > 20) return;
+        int id = System.identityHashCode(node);
+        if (!visited.add(id)) return;
+
+        if (node instanceof Element el) {
+            String localName = elementLocalName(el);
+            if ("TextObject".equals(localName) || "CT_Text".equals(localName)) {
+                String oid = firstNonBlank(
+                        el.getAttribute("ID"), el.getAttribute("Id"), el.getAttribute("id"),
+                        el.getAttribute("ObjID"), el.getAttribute("ObjectID"));
+                if (isNotBlank(oid) && semanticSeen.contains("TEXT|obj|" + oid.trim())) {
+                    return;
+                }
+                parseBlockFromDom(el, localName, elements, semanticSeen, ctx);
+                return;
+            }
+            NodeList children = el.getChildNodes();
+            for (int i = 0; i < children.getLength(); i++) {
+                Node child = children.item(i);
+                if (child instanceof Element) {
+                    walkSupplementTextOnly(child, elements, visited, semanticSeen, depth + 1, ctx);
+                }
+            }
         }
     }
 
@@ -1088,6 +1779,7 @@ public class OfdParseService {
             case "TextObject", "CT_Text" -> {
                 dto.setType("TEXT");
                 parseTextFromDom(el, dto, ctx);
+                applyTextCodeOriginOffset(dto, el);
                 if (ctm != null) dto.setRotation(extractRotationFromMatrix(ctm));
                 if (dto.getWidth() <= 0) dto.setWidth(80.0);
                 if (dto.getHeight() <= 0) dto.setHeight(18.0);
@@ -1135,39 +1827,17 @@ public class OfdParseService {
             if (Double.isFinite(scaleY) && scaleY > 0.0001) fontSize *= scaleY;
         }
 
-        // 文本内容 + 竖排判定：基于 TextCode 的 DeltaY/DeltaX
-        // 发票里 "购买方" 通常是单 TextObject + DeltaY="6 6"（每字向下推进 6mm）+ DeltaX 缺失/全 0。
-        // 老逻辑只是 append 文本，于是把竖排压成 "购买方" 一行，再用窄高外接框反推超大字号。
-        StringBuilder sb = new StringBuilder();
-        NodeList tcNodes = el.getElementsByTagNameNS("*", "TextCode");
-        if (tcNodes.getLength() == 0) tcNodes = el.getElementsByTagName("TextCode");
-        boolean verticalLayout = false;
-        for (int i = 0; i < tcNodes.getLength(); i++) {
-            Node n = tcNodes.item(i);
-            if (!(n instanceof Element tc)) continue;
-            String text = tc.getTextContent();
-            if (!isNotBlank(text)) continue;
-
-            List<Double> dy = extractNumbers(tc.getAttribute("DeltaY"));
-            List<Double> dx = extractNumbers(tc.getAttribute("DeltaX"));
-            boolean hasDy = dy.stream().anyMatch(v -> Math.abs(v) > 0.01);
-            boolean hasDx = dx.stream().anyMatch(v -> Math.abs(v) > 0.01);
-            String trimmed = text;
-            // 仅 DeltaY 有效（DeltaX 缺失/全 0）→ 当前 TextCode 是一段竖排
-            if (hasDy && !hasDx && trimmed.length() > 1) {
-                verticalLayout = true;
-                if (sb.length() > 0 && sb.charAt(sb.length() - 1) != '\n') sb.append('\n');
-                for (int k = 0; k < trimmed.length(); k++) {
-                    if (k > 0) sb.append('\n');
-                    sb.append(trimmed.charAt(k));
-                }
-            } else {
-                sb.append(trimmed);
-            }
-        }
-        dto.setContent(sb.toString());
-        dto.setVerticalLayout(verticalLayout ? Boolean.TRUE : null);
+        TextCodeParseResult parsed = parseTextCodesFromDomElement(el);
+        dto.setContent(parsed.content);
+        dto.setVerticalLayout(parsed.verticalLayout ? Boolean.TRUE : null);
         dto.setFontSize(fontSize);
+
+        Element firstTc = getFirstTextCodeElement(el);
+        String plainContent = parsed.content != null ? parsed.content.replace("\n", "").trim() : "";
+        Double adv = resolveGlyphAdvanceMm(firstTc != null ? firstTc.getAttribute("DeltaX") : null);
+        if (adv != null && adv > 0 && isCurrencyLikeContent(plainContent)) {
+            dto.setGlyphAdvanceMm(adv);
+        }
 
         String color = extractTextFillColorHexFromElement(el);
         if (!isNotBlank(color)) color = "#000000";
@@ -1492,6 +2162,7 @@ public class OfdParseService {
         if (className.contains("Text")) {
             dto.setType("TEXT");
             parseTextContent(block, dto, ctm, finalRect, ctx);
+            applyTextDomOverrides(dto, ctx);
             if (dto.getWidth() == null || dto.getWidth() <= 0) dto.setWidth(80.0);
             if (dto.getHeight() == null || dto.getHeight() <= 0) dto.setHeight(18.0);
 
@@ -1508,6 +2179,7 @@ public class OfdParseService {
             double rbx = (boundary != null && boundary.x != null) ? boundary.x : 0.0;
             double rby = (boundary != null && boundary.y != null) ? boundary.y : 0.0;
             parsePathContent(block, dto, ctm, rbx, rby);
+            applyPathDomOverrides(dto, ctx);
             if (dto.getWidth() == null || dto.getWidth() <= 0) dto.setWidth(100.0);
             if (dto.getHeight() == null || dto.getHeight() <= 0) dto.setHeight(100.0);
 
@@ -1606,43 +2278,18 @@ public class OfdParseService {
             }
             double corrected = rawSize * scaleY;
 
-            // 文本内容 + 竖排判定（ofdrw 反射读取 TextCode 的 DeltaX / DeltaY）
-            StringBuilder sb = new StringBuilder();
-            boolean verticalLayout = false;
-            Object textCodes = invokeAny(textObj, "getTextCode", "getTextCodes");
-            if (textCodes instanceof List<?>) {
-                for (Object tc : (List<?>) textCodes) {
-                    Object content = invokeAny(tc, "getContent", "getText", "getValue");
-                    if (content == null) continue;
-                    String text = String.valueOf(content);
-                    if (!isNotBlank(text)) continue;
-
-                    List<Double> dy = extractNumbers(invokeStringAny(tc, "getDeltaY"));
-                    List<Double> dx = extractNumbers(invokeStringAny(tc, "getDeltaX"));
-                    boolean hasDy = dy.stream().anyMatch(v -> Math.abs(v) > 0.01);
-                    boolean hasDx = dx.stream().anyMatch(v -> Math.abs(v) > 0.01);
-                    if (hasDy && !hasDx && text.length() > 1) {
-                        verticalLayout = true;
-                        if (sb.length() > 0 && sb.charAt(sb.length() - 1) != '\n') sb.append('\n');
-                        for (int k = 0; k < text.length(); k++) {
-                            if (k > 0) sb.append('\n');
-                            sb.append(text.charAt(k));
-                        }
-                    } else {
-                        sb.append(text);
-                    }
-                }
-            }
-            if (sb.isEmpty()) {
-                Object content = invokeAny(textObj, "getContent", "getText");
-                if (content != null) sb.append(content);
+            TextCodeParseResult parsed = parseTextCodesFromOfdrw(textObj);
+            String content = parsed.content;
+            boolean verticalLayout = parsed.verticalLayout;
+            if (content.isEmpty()) {
+                Object fallback = invokeAny(textObj, "getContent", "getText");
+                if (fallback != null) content = String.valueOf(fallback);
             }
 
-            // 字号兜底：只在反射拿到的 Size×scale 异常偏小时用 Boundary 高度抬到可读下限。
-            // 不做上界裁剪 —— 拉丁/数字内嵌片段（如 "AIoT"）的 Boundary.h 紧贴大写字母高度，
-            // 比真实字号小 1.3 倍以上是常见现象；若强行下压会让英文比相邻中文明显矮一截。
+            // 字号兜底：短标签才用 Boundary 高度抬字号；密码区等长串若按外接框抬大会严重偏大
             if (!verticalLayout
-                    && !sb.toString().contains("\n")
+                    && !content.contains("\n")
+                    && content.length() <= 20
                     && finalRect != null && finalRect.h != null && finalRect.h > 0.1
                     && finalRect.w != null && finalRect.w > 0
                     && finalRect.h < finalRect.w * 1.5) {
@@ -1650,7 +2297,7 @@ public class OfdParseService {
                 if (corrected < hBased * 0.6) corrected = hBased;
             }
             dto.setFontSize(corrected);
-            dto.setContent(sb.toString());
+            dto.setContent(content);
             dto.setVerticalLayout(verticalLayout ? Boolean.TRUE : null);
             dto.setColor(parseColorFromObject(textObj, "#000000"));
             String oid = dto.getXmlObjId();
@@ -2336,6 +2983,10 @@ public class OfdParseService {
 
     private String buildElementFingerprint(ElementDTO d) {
         if ("TEXT".equals(d.getType())) {
+            // ofdrw 优先遍历；同 ID 的模板 DOM 文本不再重复叠层（避免「密码区/销售方」偏移）
+            if (isNotBlank(d.getXmlObjId())) {
+                return "TEXT|obj|" + d.getXmlObjId().trim();
+            }
             // 文本去重不使用CTM，避免模板DOM与ofdrw反射对象因矩阵表达差异产生重复叠层
             return String.join("|",
                     safeStr(d.getType()),
@@ -2344,7 +2995,7 @@ public class OfdParseService {
             );
         }
         if ("IMAGE".equals(d.getType())) {
-            // PDF 转 OFD 等场景：同一 ImageObject 会分别从 Content.xml DOM 与 ofdrw 各解析一次
+            // PDF 转 OFD 等场景：同一 ImageObject 可能重复出现
             if (isNotBlank(d.getResourceId())) {
                 return "IMAGE|res|" + d.getResourceId().trim();
             }
@@ -2355,6 +3006,9 @@ public class OfdParseService {
                     safeStr(d.getType()),
                     q(d.getX()), q(d.getY()), q(d.getWidth()), q(d.getHeight())
             );
+        }
+        if ("PATH".equals(d.getType()) && isNotBlank(d.getXmlObjId())) {
+            return "PATH|obj|" + d.getXmlObjId().trim();
         }
         return String.join("|",
                 safeStr(d.getType()),
@@ -2421,9 +3075,31 @@ public class OfdParseService {
         final Map<String, String> resourceDataUrlById = new ConcurrentHashMap<>();
         final Map<String, String> resourcePathById    = new ConcurrentHashMap<>();
         final Set<String> annotResourceIds = new HashSet<>();
-        /** 当前页 Content.xml：TextObject 的 XML ID → #RRGGBB */
+        /** 当前页/模板 XML：TextObject 的 XML ID → #RRGGBB */
         final Map<String, String> textFillHexByObjectIdPage = new LinkedHashMap<>();
+        /** 当前页/模板 XML：TextObject 的 XML ID → 几何与文本 */
+        final Map<String, TextObjectDomInfo> textDomByObjectIdPage = new LinkedHashMap<>();
+        /** 当前页/模板 XML：PathObject 的 XML ID → Boundary + 路径数据 */
+        final Map<String, PathObjectDomInfo> pathDomByObjectIdPage = new LinkedHashMap<>();
         ZipFile zipFile;
+    }
+
+    private static class PathObjectDomInfo {
+        Double x, y, w, h;
+        String abbrevData;
+        String ctmStr;
+    }
+
+    private static class TextObjectDomInfo {
+        Double boundaryX, boundaryY;
+        Double w, h;
+        Double tcOffX, tcOffY;
+        String content;
+        Boolean verticalLayout;
+        Boolean passwordGrid;
+        Boolean preferDomGeometry;
+        Double fontSize;
+        Double glyphAdvanceMm;
     }
 
     private static class Rect {
