@@ -1,5 +1,5 @@
 // ========== 元素类型 ==========
-export type OfdElementType = 'TEXT' | 'IMAGE' | 'PATH' | 'OTHER'
+export type OfdElementType = 'TEXT' | 'IMAGE' | 'PATH' | 'SEAL' | 'OTHER'
 
 export type AnnotationType =
     | 'HIGHLIGHT'    // 高亮

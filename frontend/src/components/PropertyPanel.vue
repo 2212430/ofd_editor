@@ -343,7 +343,7 @@ async function handleDeleteAnnotation() {
 
 // ─── OFD 元素 ─────────────────────────────────────────────────────────────
 const typeLabel: Record<string, string> = {
-  TEXT: '文本', IMAGE: '图像', PATH: '矢量', OTHER: '其他',
+  TEXT: '文本', IMAGE: '图像', PATH: '矢量', SEAL: '电子签章', OTHER: '其他',
 }
 
 function round(val: number) {

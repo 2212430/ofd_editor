@@ -44,6 +44,14 @@
               @transformend="(e: any) => handleTransformEnd(e, element.id)"
           />
           <v-image
+              v-else-if="element.type === 'SEAL' && !!imageMap[element.id]"
+              :config="getSealConfig(element)"
+          />
+          <v-rect
+              v-else-if="element.type === 'SEAL' && getImageSrc(element) && !imageErrorMap[element.id]"
+              :config="getSealPlaceholderConfig(element)"
+          />
+          <v-image
               v-else-if="element.type === 'IMAGE' && !!imageMap[element.id]"
               :config="getImageConfig(element)"
               @click="handleElementClick($event, element.id)"
@@ -369,7 +377,7 @@ const imageErrorMap = reactive<Record<string, boolean>>({})
 
 watch(
     () => props.page.elements
-        .filter(el => el.type === 'IMAGE')
+        .filter(el => el.type === 'IMAGE' || el.type === 'SEAL')
         .map(el => ({ id: el.id, src: getImageSrc(el) })),
     (items) => {
       for (const item of items) {
@@ -778,6 +786,8 @@ function loadImageDimensions(src: string): Promise<{ width: number; height: numb
 
 function handleElementClick(e: any, elementId: string) {
   if (store.isAnnotationTool) return
+  const el = props.page.elements.find(item => item.id === elementId)
+  if (el?.type === 'SEAL') return
   e.cancelBubble = true
   store.selectElement(elementId)
 }
@@ -1325,6 +1335,29 @@ function isNotEmptyStr(s: unknown) {
   return typeof s === 'string' && s.length > 0
 }
 
+function getSealConfig(element: ElementData) {
+  return {
+    id:        element.id,
+    x:         s(element.x),
+    y:         s(element.y),
+    width:     s(element.width),
+    height:    s(element.height),
+    rotation:  element.rotation ?? 0,
+    image:     imageMap[element.id],
+    listening: false,
+    draggable: false,
+  }
+}
+
+function getSealPlaceholderConfig(element: ElementData) {
+  return {
+    id: element.id, x: s(element.x), y: s(element.y),
+    width: s(element.width), height: s(element.height),
+    fill: 'rgba(200,50,50,0.08)', stroke: 'rgba(200,50,50,0.25)',
+    strokeWidth: 1, listening: false, draggable: false,
+  }
+}
+
 function getImageConfig(element: ElementData) {
   const isSelected = store.selectedElementId === element.id
   return {
@@ -1600,7 +1633,7 @@ function getStampConfig(ann: AnnotationData) {
 /** 当前页所需的位图（OFD 图像 + 图章）是否都已加载完成 */
 function allImagesReady(): boolean {
   for (const el of props.page.elements) {
-    if (el.type === 'IMAGE') {
+    if (el.type === 'IMAGE' || el.type === 'SEAL') {
       const src = getImageSrc(el)
       if (src && !imageMap[el.id] && !imageErrorMap[el.id]) return false
     }

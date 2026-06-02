@@ -4,8 +4,14 @@ import com.ofdeditor.dto.ElementDTO;
 import com.ofdeditor.dto.OfdDocumentDTO;
 import com.ofdeditor.dto.PageDTO;
 import lombok.extern.slf4j.Slf4j;
+import org.ofdrw.converter.ImageMaker;
 import org.ofdrw.core.basicType.ST_Box;
+import org.ofdrw.core.basicType.ST_ID;
+import org.ofdrw.core.basicType.ST_RefID;
+import org.ofdrw.core.signatures.appearance.StampAnnot;
 import org.ofdrw.reader.OFDReader;
+import org.ofdrw.reader.model.StampAnnotEntity;
+import org.ofdrw.reader.tools.ImageUtils;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 import org.w3c.dom.Document;
@@ -13,8 +19,11 @@ import org.w3c.dom.Element;
 import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
 import com.ofdeditor.dto.AnnotationDTO;
+import javax.imageio.ImageIO;
 import javax.xml.parsers.DocumentBuilderFactory;
+import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
@@ -54,6 +63,7 @@ public class OfdParseService {
              ZipFile zipFile = new ZipFile(tempFile.toFile())) {
 
             ParseContext ctx = buildParseContext(tempFile, reader, zipFile);
+            loadDigitalSeals(reader, ctx);
             documentDTO.setTitle(getFileNameWithoutExt(file.getOriginalFilename()));
             documentDTO.setAuthor("未知");
 
@@ -529,6 +539,9 @@ public class OfdParseService {
 
             // 注释层（印章等）
             parseAnnotations(pageNum, elements, ctx);
+
+            // 电子签章（Signs/ → SignedValue 内嵌印章图）
+            appendDigitalSealsForPage(pageIndex, elements, ctx);
 
         } catch (Exception e) {
             log.warn("解析第{}页内容失败: {}", pageNum, e.getMessage());
@@ -2492,6 +2505,205 @@ public class OfdParseService {
         return ctx;
     }
 
+    /**
+     * 解析 OFD 数字签章（Signs/Signatures.xml → Signature.xml → SignedValue.dat），
+     * 从 SES 结构提取印章图片，并按 StampAnnot 的 PageRef / Boundary 映射到各页。
+     */
+    private void loadDigitalSeals(OFDReader reader, ParseContext ctx) {
+        ctx.digitalSealsByPage = new HashMap<>();
+        if (reader == null) {
+            log.debug("签章解析跳过: reader 为空");
+            return;
+        }
+        if (!reader.hasSignature()) {
+            log.debug("签章解析跳过: 文档无 Signs");
+            return;
+        }
+        Map<Long, Integer> pageRefToIndex = buildPageRefToIndex(reader);
+        List<StampAnnotEntity> entities;
+        try {
+            entities = reader.getStampAnnots();
+        } catch (Exception e) {
+            log.warn("读取签章列表失败: {}", e.getMessage());
+            return;
+        }
+        if (entities == null || entities.isEmpty()) {
+            log.info("签章解析: getStampAnnots 返回空列表");
+            return;
+        }
+
+        int sealCount = 0;
+        for (StampAnnotEntity entity : entities) {
+            if (entity == null) continue;
+            byte[] imgBytes = entity.getImageByte();
+            if (imgBytes == null || imgBytes.length == 0) continue;
+
+            String imgType = entity.getImgType();
+            String dataUrl = sealBytesToDataUrl(imgBytes, imgType);
+            if (!isNotBlank(dataUrl)) {
+                log.warn("签章外观转图片失败: imgType={}, bytes={}", imgType, imgBytes.length);
+                continue;
+            }
+
+            List<StampAnnot> stampAnnots = entity.getStampAnnots();
+            if (stampAnnots == null || stampAnnots.isEmpty()) continue;
+
+            for (StampAnnot stampAnnot : stampAnnots) {
+                if (stampAnnot == null) continue;
+                Integer pageIndex = resolveStampPageIndex(stampAnnot.getPageRef(), pageRefToIndex);
+                ST_Box box = stampAnnot.getBoundary();
+                if (pageIndex == null || box == null) {
+                    log.warn("签章 PageRef 无法映射: pageRef={}, boundary={}",
+                            stampAnnot.getPageRef(), stampAnnot.getBoundary());
+                    continue;
+                }
+
+                Double x = box.getTopLeftX();
+                Double y = box.getTopLeftY();
+                Double w = box.getWidth();
+                Double h = box.getHeight();
+                if (x == null || y == null || w == null || h == null || w <= 0 || h <= 0) continue;
+
+                ElementDTO dto = new ElementDTO();
+                dto.setId(UUID.randomUUID().toString());
+                dto.setType("SEAL");
+                dto.setX(x);
+                dto.setY(y);
+                dto.setWidth(w);
+                dto.setHeight(h);
+                dto.setRotation(0.0);
+                dto.setScaleX(1.0);
+                dto.setScaleY(1.0);
+                dto.setImageBase64(dataUrl);
+                dto.setImageData(dataUrl);
+                dto.setIsDirty(false);
+                dto.setSkip(true);
+                dto.setOriginalX(x);
+                dto.setOriginalY(y);
+                dto.setOriginalWidth(w);
+                dto.setOriginalHeight(h);
+                dto.setOriginalRotation(0.0);
+
+                ctx.digitalSealsByPage
+                        .computeIfAbsent(pageIndex, k -> new ArrayList<>())
+                        .add(dto);
+                sealCount++;
+            }
+        }
+        log.info("电子签章解析完成: {} 个 StampAnnot 外观", sealCount);
+    }
+
+    /**
+     * 发票等文档的签章外观常为嵌入式 mini-OFD（imgType=OFD），需 rasterize 后再展示。
+     */
+    /** 签章 PNG 去白底阈值（与 ofdrw AWTMaker 默认一致） */
+    private static final int SEAL_BG_GRAY_THRESHOLD = 244;
+
+    private String sealBytesToDataUrl(byte[] imgBytes, String imgType) {
+        if (imgBytes == null || imgBytes.length == 0) return null;
+        if (isNotBlank(imgType) && "OFD".equalsIgnoreCase(imgType.trim())) {
+            return renderEmbeddedSealOfdToDataUrl(imgBytes);
+        }
+        if (looksLikeZip(imgBytes)) {
+            String rendered = renderEmbeddedSealOfdToDataUrl(imgBytes);
+            if (isNotBlank(rendered)) return rendered;
+        }
+        try {
+            BufferedImage raw = ImageIO.read(new ByteArrayInputStream(imgBytes));
+            if (raw != null) {
+                return bufferedImageToTransparentSealDataUrl(raw);
+            }
+        } catch (Exception e) {
+            log.debug("签章位图读取失败，回退原始字节: {}", e.getMessage());
+        }
+        String mime = sealImageMime(imgType);
+        return "data:" + mime + ";base64," + Base64.getEncoder().encodeToString(imgBytes);
+    }
+
+    private boolean looksLikeZip(byte[] bytes) {
+        return bytes.length >= 2 && bytes[0] == 'P' && bytes[1] == 'K';
+    }
+
+    private String renderEmbeddedSealOfdToDataUrl(byte[] sealOfdBytes) {
+        try (OFDReader sealReader = new OFDReader(new ByteArrayInputStream(sealOfdBytes))) {
+            if (sealReader.getNumberOfPages() <= 0) return null;
+            ImageMaker maker = newImageMakerForSeal(sealReader);
+            BufferedImage img = maker.makePage(0);
+            return bufferedImageToTransparentSealDataUrl(img);
+        } catch (Exception e) {
+            log.warn("渲染 OFD 签章外观失败: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /** ofdrw 包内通过 isStamp=true 使用透明画布；此处用反射设置同字段 */
+    private ImageMaker newImageMakerForSeal(OFDReader sealReader) {
+        ImageMaker maker = new ImageMaker(sealReader, 12.0);
+        try {
+            java.lang.reflect.Field f = org.ofdrw.converter.AWTMaker.class.getDeclaredField("isStamp");
+            f.setAccessible(true);
+            f.setBoolean(maker, true);
+        } catch (Exception e) {
+            log.debug("无法设置 ImageMaker.isStamp，将仅依赖去白底: {}", e.getMessage());
+        }
+        return maker;
+    }
+
+    private String bufferedImageToTransparentSealDataUrl(BufferedImage img) throws java.io.IOException {
+        if (img == null) return null;
+        BufferedImage transparent = ImageUtils.clearWhiteBackground(img, SEAL_BG_GRAY_THRESHOLD);
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        ImageIO.write(transparent, "png", baos);
+        return "data:image/png;base64," + Base64.getEncoder().encodeToString(baos.toByteArray());
+    }
+
+    private Map<Long, Integer> buildPageRefToIndex(OFDReader reader) {
+        Map<Long, Integer> map = new HashMap<>();
+        try {
+            int pageCount = reader.getNumberOfPages();
+            for (int pageNum = 1; pageNum <= pageCount; pageNum++) {
+                ST_ID pageId = reader.getPageObjectId(pageNum);
+                if (pageId == null || pageId.getId() == null) continue;
+                map.put(pageId.getId(), pageNum - 1);
+            }
+        } catch (Exception e) {
+            log.warn("构建 PageRef 映射失败: {}", e.getMessage());
+        }
+        return map;
+    }
+
+    private Integer resolveStampPageIndex(ST_RefID pageRef, Map<Long, Integer> pageRefToIndex) {
+        if (pageRef == null || pageRefToIndex == null || pageRefToIndex.isEmpty()) return null;
+        if (pageRef.getRefId() != null) {
+            Integer idx = pageRefToIndex.get(pageRef.getRefId().getId());
+            if (idx != null) return idx;
+        }
+        try {
+            return pageRefToIndex.get(Long.parseLong(pageRef.toString().trim()));
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private String sealImageMime(String imgType) {
+        if (!isNotBlank(imgType)) return "image/png";
+        return switch (imgType.trim().toUpperCase(Locale.ROOT)) {
+            case "PNG" -> "image/png";
+            case "GIF" -> "image/gif";
+            case "JPG", "JPEG" -> "image/jpeg";
+            case "BMP" -> "image/bmp";
+            case "SVG" -> "image/svg+xml";
+            default -> "image/png";
+        };
+    }
+
+    private void appendDigitalSealsForPage(int pageIndex, List<ElementDTO> elements, ParseContext ctx) {
+        if (ctx.digitalSealsByPage == null) return;
+        List<ElementDTO> seals = ctx.digitalSealsByPage.get(pageIndex);
+        if (seals == null || seals.isEmpty()) return;
+        elements.addAll(seals);
+    }
+
     private void indexImageResourcesFromOfdZip(Path ofdPath, ParseContext ctx) throws Exception {
         try (ZipFile zip = new ZipFile(ofdPath.toFile())) {
             String ofdXmlPath = findEntryIgnoreCase(zip, "OFD.xml");
@@ -3075,6 +3287,8 @@ public class OfdParseService {
         final Map<String, String> resourceDataUrlById = new ConcurrentHashMap<>();
         final Map<String, String> resourcePathById    = new ConcurrentHashMap<>();
         final Set<String> annotResourceIds = new HashSet<>();
+        /** 各页电子签章（Signs/），只读展示，不参与保存回写 */
+        Map<Integer, List<ElementDTO>> digitalSealsByPage = new HashMap<>();
         /** 当前页/模板 XML：TextObject 的 XML ID → #RRGGBB */
         final Map<String, String> textFillHexByObjectIdPage = new LinkedHashMap<>();
         /** 当前页/模板 XML：TextObject 的 XML ID → 几何与文本 */
