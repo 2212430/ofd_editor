@@ -242,7 +242,12 @@
         <RibbonGroup label="格式转换">
           <RibbonButton label="PDF转OFD" :icon="Upload" @click="pdfInputRef?.click()" />
           <RibbonButton label="OFD转PDF" :icon="Download" :disabled="!store.document" @click="handleExportPdf" />
-          <RibbonButton label="批量转换" :icon="Files" disabled tooltip="即将推出" @click="comingSoon" />
+          <RibbonButton
+              label="OFD合并"
+              :icon="Files"
+              tooltip="合并两个 OFD：第一个文件的页面在前，第二个在后"
+              @click="mergeDialogVisible = true"
+          />
         </RibbonGroup>
         <RibbonSep />
         <RibbonGroup label="导出">
@@ -284,6 +289,7 @@
     </div>
 
     <DocumentPropertiesDialog v-model="docPropsVisible" />
+    <OfdMergeDialog v-model="mergeDialogVisible" />
   </div>
 </template>
 
@@ -306,6 +312,7 @@ import {
 } from '@/api/ofdApi'
 import RibbonButton from '@/components/RibbonButton.vue'
 import DocumentPropertiesDialog from '@/components/DocumentPropertiesDialog.vue'
+import OfdMergeDialog from '@/components/OfdMergeDialog.vue'
 
 const HandIcon = defineComponent({
   name: 'HandIcon',
@@ -333,6 +340,7 @@ const pdfInputRef = ref<HTMLInputElement>()
 const imageInputRef = ref<HTMLInputElement>()
 const stampInputRef = ref<HTMLInputElement>()
 const docPropsVisible = ref(false)
+const mergeDialogVisible = ref(false)
 const activeTab = ref('home')
 
 const tabs = [

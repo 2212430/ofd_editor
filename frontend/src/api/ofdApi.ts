@@ -135,6 +135,20 @@ export const ofdApi = {
         return res.data
     },
 
+    /**
+     * 合并两个 OFD（第一个文件的页面在前，第二个在后）
+     * POST /api/ofd/merge
+     */
+    mergeOfd: async (first: File, second: File): Promise<DocumentData> => {
+        const form = new FormData()
+        form.append('first', first)
+        form.append('second', second)
+        const res = await http.post<DocumentData>('/merge', form, {
+            timeout: 300_000,
+        })
+        return res.data
+    },
+
     /** OFD转PDF（42 页级文档转换可能超过 60s，单独放宽超时） */
     toPdf: async (file: File): Promise<Blob> => {
         const form = new FormData()

@@ -5,6 +5,7 @@ import com.ofdeditor.dto.OfdDocumentDTO;
 import com.ofdeditor.service.AnnotationService;
 import com.ofdeditor.service.ConversionService;
 import com.ofdeditor.service.OfdCacheService;
+import com.ofdeditor.service.OfdMergeService;
 import com.ofdeditor.service.OfdParseService;
 import com.ofdeditor.service.OfdRebuildService;
 import lombok.RequiredArgsConstructor;
@@ -27,10 +28,11 @@ import java.util.UUID;
 public class OfdController {
 
     private final OfdParseService parseService;
+    private final OfdMergeService mergeService;
     private final ConversionService conversionService;
     private final OfdRebuildService rebuildService;
     private final OfdCacheService cacheService;
-    private final AnnotationService annotationService;  // ← 新增
+    private final AnnotationService annotationService;
 
     @GetMapping("/health")
     public ResponseEntity<String> health() {
@@ -79,6 +81,74 @@ public class OfdController {
             log.error("解析OFD失败: {}", e.getMessage(), e);
             return ResponseEntity.internalServerError().body("解析失败: " + e.getMessage());
         }
+    }
+
+    /**
+     * 合并两个 OFD：第一个文件的全部页面在前，第二个在后（当前仅支持 2 个文件）
+     */
+    @PostMapping("/merge")
+    public ResponseEntity<?> mergeOfd(
+            @RequestParam("first") MultipartFile first,
+            @RequestParam("second") MultipartFile second) {
+        try {
+            if (first.isEmpty() || second.isEmpty()) {
+                return ResponseEntity.badRequest().body("请选择两个 OFD 文件");
+            }
+            String name1 = first.getOriginalFilename();
+            String name2 = second.getOriginalFilename();
+            if (!isOfdFilename(name1) || !isOfdFilename(name2)) {
+                return ResponseEntity.badRequest().body("请上传 OFD 格式文件");
+            }
+
+            log.info("收到合并请求: {} ({} bytes) + {} ({} bytes)",
+                    name1, first.getSize(), name2, second.getSize());
+
+            byte[] bytes1 = first.getBytes();
+            byte[] bytes2 = second.getBytes();
+            byte[] merged = mergeService.mergeTwoOfd(bytes1, bytes2);
+
+            String fileId = UUID.randomUUID().toString();
+            cacheService.put(fileId, merged);
+
+            String mergedTitle = buildMergeTitle(name1, name2);
+            OfdDocumentDTO result = parseService.parseOfdBytes(merged, mergedTitle + ".ofd");
+            result.setFileId(fileId);
+            result.setTitle(mergedTitle);
+
+            try {
+                Map<Integer, List<AnnotationDTO>> mergedAnnotations =
+                        parseService.parseAnnotations(merged);
+                annotationService.initFromOfd(fileId, mergedAnnotations);
+            } catch (Exception e) {
+                log.warn("合并后解析注释层失败: {}", e.getMessage());
+            }
+
+            log.info("OFD 合并成功: fileId={}, 共 {} 页", fileId, result.getPageCount());
+            return ResponseEntity.ok(result);
+
+        } catch (Exception e) {
+            log.error("合并 OFD 失败: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body("合并失败: " + e.getMessage());
+        }
+    }
+
+    private static boolean isOfdFilename(String filename) {
+        return filename != null && filename.toLowerCase().endsWith(".ofd");
+    }
+
+    private static String buildMergeTitle(String name1, String name2) {
+        String base1 = stripOfdExt(name1);
+        String base2 = stripOfdExt(name2);
+        return base1 + "_合并_" + base2;
+    }
+
+    private static String stripOfdExt(String filename) {
+        if (filename == null) return "文档";
+        String n = filename.trim();
+        if (n.toLowerCase().endsWith(".ofd")) {
+            n = n.substring(0, n.length() - 4);
+        }
+        return n.isEmpty() ? "文档" : n;
     }
 
     /**

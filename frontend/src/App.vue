@@ -99,6 +99,7 @@
         aria-hidden="true"
     >
       <CanvasEditor
+          :key="`thumb-${thumbCapturePageIndex}`"
           ref="thumbCanvasRef"
           offscreen
           :fixed-scale="1"
@@ -174,6 +175,23 @@ async function waitForCanvasPaint() {
   })
 }
 
+/** 离屏缩略图：等待对应页画布挂载并完成布局（合并后页数多、资源大时需更长时间） */
+async function waitForThumbCanvasReady(pageIndex: number, maxMs = 10_000) {
+  const start = Date.now()
+  while (Date.now() - start < maxMs) {
+    await nextTick()
+    const page = store.document?.pages[pageIndex]
+    if (thumbCanvasRef.value && thumbCapturePageIndex.value === pageIndex && page) {
+      await new Promise<void>((r) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => r()))
+      })
+      return true
+    }
+    await new Promise<void>((r) => setTimeout(r, 50))
+  }
+  return false
+}
+
 async function handleExportCurrentPageImage() {
   const doc = store.document
   if (!doc) return
@@ -224,18 +242,26 @@ onMounted(() => {
 
   store.registerThumbnailCaptureHook(async (pageIndex: number) => {
     const doc = store.document
-    if (!doc || !thumbCanvasRef.value) return null
-    if (pageIndex < 0 || pageIndex >= doc.pageCount) return null
+    if (!doc || pageIndex < 0 || pageIndex >= doc.pageCount) return null
+    if (!doc.pages[pageIndex]) return null
 
     thumbCapturePageIndex.value = pageIndex
-    await waitForCanvasPaint()
+    const ready = await waitForThumbCanvasReady(pageIndex)
+    if (!ready || !thumbCanvasRef.value) {
+      console.warn('[thumbnail] 离屏画布未就绪', pageIndex)
+      return null
+    }
+
     const cap = await thumbCanvasRef.value.captureForPrint(THUMBNAIL_PIXEL_RATIO, true)
-    return cap?.dataUrl ?? null
+    const url = cap?.dataUrl ?? ''
+    // 过短的 dataURL 多为导出失败（空白图）
+    return url.length > 200 ? url : null
   })
 })
 
 onUnmounted(() => {
   store.registerExportCurrentPageImageHook(null)
+  store.registerThumbnailCaptureHook(null)
 })
 
 function triggerUpload() {
@@ -467,13 +493,13 @@ async function handleWelcomePdf(e: Event) {
 }
 .status-left { display: flex; align-items: center; gap: 8px; }
 
-/* 缩略图离屏渲染：不参与布局、不可见，避免截图时主画布闪动 */
+/* 缩略图离屏渲染：移出视口但保持可绘制（visibility:hidden 会导致 Konva toDataURL 空白） */
 .thumb-capture-host {
   position: fixed;
-  left: -100000px;
+  left: -12000px;
   top: 0;
   overflow: hidden;
-  visibility: hidden;
+  opacity: 0.01;
   pointer-events: none;
   z-index: -1;
 }

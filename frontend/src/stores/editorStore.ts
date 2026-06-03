@@ -359,7 +359,7 @@ export const useEditorStore = defineStore('editor', () => {
     }
 
     function registerThumbnailCaptureHook(
-        hook: (pageIndex: number) => Promise<string | null>
+        hook: ((pageIndex: number) => Promise<string | null>) | null,
     ) {
         thumbnailCaptureHook = hook
     }
@@ -393,7 +393,12 @@ export const useEditorStore = defineStore('editor', () => {
 
                 thumbnailLoadingPages[pageIndex] = true
                 try {
-                    const dataUrl = await thumbnailCaptureHook(pageIndex)
+                    let dataUrl = await thumbnailCaptureHook(pageIndex)
+                    // 首次失败（离屏画布未就绪等）短暂重试一次
+                    if (!dataUrl) {
+                        await new Promise((r) => setTimeout(r, 120))
+                        dataUrl = await thumbnailCaptureHook(pageIndex)
+                    }
                     if (dataUrl) pageThumbnails[pageIndex] = dataUrl
                 } catch (e) {
                     console.warn(`[editorStore] 缩略图生成失败 page=${pageIndex}:`, e)

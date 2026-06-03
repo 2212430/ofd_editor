@@ -55,7 +55,24 @@ public class OfdParseService {
     public OfdDocumentDTO parseOfd(MultipartFile file) throws Exception {
         Path tempFile = Files.createTempFile("ofd_upload_", ".ofd");
         file.transferTo(tempFile);
+        try {
+            return parseOfdFromPath(tempFile, file.getOriginalFilename());
+        } finally {
+            Files.deleteIfExists(tempFile);
+        }
+    }
 
+    public OfdDocumentDTO parseOfdBytes(byte[] fileBytes, String originalFilename) throws Exception {
+        Path tempFile = Files.createTempFile("ofd_upload_", ".ofd");
+        try {
+            Files.write(tempFile, fileBytes);
+            return parseOfdFromPath(tempFile, originalFilename);
+        } finally {
+            Files.deleteIfExists(tempFile);
+        }
+    }
+
+    private OfdDocumentDTO parseOfdFromPath(Path tempFile, String originalFilename) throws Exception {
         OfdDocumentDTO documentDTO = new OfdDocumentDTO();
         List<PageDTO> pages = new ArrayList<>();
 
@@ -64,7 +81,7 @@ public class OfdParseService {
 
             ParseContext ctx = buildParseContext(tempFile, reader, zipFile);
             loadDigitalSeals(reader, ctx);
-            documentDTO.setTitle(getFileNameWithoutExt(file.getOriginalFilename()));
+            documentDTO.setTitle(getFileNameWithoutExt(originalFilename));
             documentDTO.setAuthor("未知");
 
             int pageCount = reader.getNumberOfPages();
@@ -84,8 +101,6 @@ public class OfdParseService {
                     pages.add(emptyPage);
                 }
             }
-        } finally {
-            Files.deleteIfExists(tempFile);
         }
 
         documentDTO.setPages(pages);
