@@ -8,6 +8,7 @@ import com.ofdeditor.service.OfdCacheService;
 import com.ofdeditor.service.OfdMergeService;
 import com.ofdeditor.service.OfdParseService;
 import com.ofdeditor.service.OfdRebuildService;
+import com.ofdeditor.service.PdfMergeService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpHeaders;
@@ -29,6 +30,7 @@ public class OfdController {
 
     private final OfdParseService parseService;
     private final OfdMergeService mergeService;
+    private final PdfMergeService pdfMergeService;
     private final ConversionService conversionService;
     private final OfdRebuildService rebuildService;
     private final OfdCacheService cacheService;
@@ -146,6 +148,61 @@ public class OfdController {
         if (filename == null) return "文档";
         String n = filename.trim();
         if (n.toLowerCase().endsWith(".ofd")) {
+            n = n.substring(0, n.length() - 4);
+        }
+        return n.isEmpty() ? "文档" : n;
+    }
+
+    /**
+     * 合并两个 PDF（PDF 原生拼接，第一个文件页面在前）
+     * 返回合并后的 PDF 文件供浏览器下载，再由前端决定是否导入为 OFD 编辑。
+     */
+    @PostMapping("/merge-pdf")
+    public ResponseEntity<?> mergePdf(
+            @RequestParam("first") MultipartFile first,
+            @RequestParam("second") MultipartFile second) {
+        try {
+            if (first.isEmpty() || second.isEmpty()) {
+                return ResponseEntity.badRequest().body("请选择两个 PDF 文件");
+            }
+            String name1 = first.getOriginalFilename();
+            String name2 = second.getOriginalFilename();
+            if (!isPdfFilename(name1) || !isPdfFilename(name2)) {
+                return ResponseEntity.badRequest().body("请上传 PDF 格式文件");
+            }
+
+            log.info("收到 PDF 合并请求: {} + {}", name1, name2);
+            byte[] merged = pdfMergeService.mergeTwoPdf(first.getBytes(), second.getBytes());
+            String filename = URLEncoder.encode(
+                    buildMergePdfFilename(name1, name2),
+                    StandardCharsets.UTF_8);
+
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_TYPE, "application/pdf")
+                    .header(HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename*=UTF-8''" + filename)
+                    .body(merged);
+
+        } catch (Exception e) {
+            log.error("合并 PDF 失败: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body("合并失败: " + e.getMessage());
+        }
+    }
+
+    private static boolean isPdfFilename(String filename) {
+        return filename != null && filename.toLowerCase().endsWith(".pdf");
+    }
+
+    private static String buildMergePdfFilename(String name1, String name2) {
+        String base1 = stripPdfExt(name1);
+        String base2 = stripPdfExt(name2);
+        return base1 + "_合并_" + base2 + ".pdf";
+    }
+
+    private static String stripPdfExt(String filename) {
+        if (filename == null) return "文档";
+        String n = filename.trim();
+        if (n.toLowerCase().endsWith(".pdf")) {
             n = n.substring(0, n.length() - 4);
         }
         return n.isEmpty() ? "文档" : n;

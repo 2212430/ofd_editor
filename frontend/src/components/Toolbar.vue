@@ -248,6 +248,12 @@
               tooltip="合并两个 OFD：第一个文件的页面在前，第二个在后"
               @click="mergeDialogVisible = true"
           />
+          <RibbonButton
+              label="PDF合并"
+              :icon="Files"
+              tooltip="合并两个 PDF 并先下载原生 PDF，再导入编辑器"
+              @click="pdfMergeDialogVisible = true"
+          />
         </RibbonGroup>
         <RibbonSep />
         <RibbonGroup label="导出">
@@ -290,6 +296,7 @@
 
     <DocumentPropertiesDialog v-model="docPropsVisible" />
     <OfdMergeDialog v-model="mergeDialogVisible" />
+    <PdfMergeDialog v-model="pdfMergeDialogVisible" />
   </div>
 </template>
 
@@ -313,6 +320,7 @@ import {
 import RibbonButton from '@/components/RibbonButton.vue'
 import DocumentPropertiesDialog from '@/components/DocumentPropertiesDialog.vue'
 import OfdMergeDialog from '@/components/OfdMergeDialog.vue'
+import PdfMergeDialog from '@/components/PdfMergeDialog.vue'
 
 const HandIcon = defineComponent({
   name: 'HandIcon',
@@ -341,6 +349,7 @@ const imageInputRef = ref<HTMLInputElement>()
 const stampInputRef = ref<HTMLInputElement>()
 const docPropsVisible = ref(false)
 const mergeDialogVisible = ref(false)
+const pdfMergeDialogVisible = ref(false)
 const activeTab = ref('home')
 
 const tabs = [

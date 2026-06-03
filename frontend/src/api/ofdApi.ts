@@ -15,6 +15,11 @@ export function sanitizeFilename(name: string): string {
 }
 
 /** 保证文件名以 .ofd 结尾 */
+export function buildMergedPdfFilename(firstName: string, secondName: string): string {
+    const strip = (n: string) => sanitizeFilename(n).replace(/\.pdf$/i, '') || '文档'
+    return `${strip(firstName)}_合并_${strip(secondName)}.pdf`
+}
+
 export function ensureOfdFilename(name: string): string {
     const base = sanitizeFilename(name).replace(/\.ofd$/i, '')
     return `${base || 'export'}.ofd`
@@ -139,6 +144,21 @@ export const ofdApi = {
      * 合并两个 OFD（第一个文件的页面在前，第二个在后）
      * POST /api/ofd/merge
      */
+    /**
+     * 合并两个 PDF（第一个文件页面在前），返回合并后的 PDF Blob
+     * POST /api/ofd/merge-pdf
+     */
+    mergePdf: async (first: File, second: File): Promise<Blob> => {
+        const form = new FormData()
+        form.append('first', first)
+        form.append('second', second)
+        const res = await http.post('/merge-pdf', form, {
+            responseType: 'blob',
+            timeout: 600_000,
+        })
+        return ensureBlobOk(res.data, res.headers['content-type'])
+    },
+
     mergeOfd: async (first: File, second: File): Promise<DocumentData> => {
         const form = new FormData()
         form.append('first', first)
