@@ -41,6 +41,10 @@ export const useEditorStore = defineStore('editor', () => {
     const annotationsMap = reactive<Record<number, AnnotationData[]>>({})
 
     const selectedAnnotationId = ref<string | null>(null)
+    /** 右侧面板：属性 / 注释列表 */
+    const rightPanelTab = ref<'properties' | 'annotations'>('properties')
+    /** 注释列表范围：当前页 / 全部页 */
+    const annotationListScope = ref<'current' | 'all'>('current')
     const annotationColor = ref('#000000')
     const annotationOpacity = ref(0.5)
     const annotationLineWidth = ref(2)
@@ -95,6 +99,31 @@ export const useEditorStore = defineStore('editor', () => {
     )
 
     const hasPendingStamp = computed(() => !!pendingStampImage.value)
+
+    const flatAnnotationList = computed(() => {
+        const items: { annotation: AnnotationData; pageIndex: number }[] = []
+        const pageCount = document.value?.pageCount ?? 0
+        for (let p = 0; p < pageCount; p++) {
+            for (const ann of annotationsMap[p] ?? []) {
+                items.push({ annotation: ann, pageIndex: p })
+            }
+        }
+        return items.sort((a, b) => {
+            if (a.pageIndex !== b.pageIndex) return a.pageIndex - b.pageIndex
+            return (a.annotation.createdAt ?? 0) - (b.annotation.createdAt ?? 0)
+        })
+    })
+
+    const filteredAnnotationList = computed(() => {
+        if (annotationListScope.value === 'current') {
+            return flatAnnotationList.value.filter(
+                (item) => item.pageIndex === currentPageIndex.value,
+            )
+        }
+        return flatAnnotationList.value
+    })
+
+    const annotationCount = computed(() => flatAnnotationList.value.length)
 
     // ==================== 原有方法 ====================
     function ensurePageIds() {
@@ -269,6 +298,8 @@ export const useEditorStore = defineStore('editor', () => {
         selectedElementId.value = null
         selectedAnnotationId.value = null
         pendingStampImage.value = null
+        rightPanelTab.value = 'properties'
+        annotationListScope.value = 'current'
         clearPageThumbnails()
         viewRotation.value = 0
         saveToHistory()
@@ -444,9 +475,23 @@ export const useEditorStore = defineStore('editor', () => {
     }
 
     let scrollToPageInViewHook: ((pageIndex: number) => void) | null = null
+    let exportCurrentPageImageHook: (() => Promise<void>) | null = null
 
     function registerScrollToPageInViewHook(hook: (pageIndex: number) => void) {
         scrollToPageInViewHook = hook
+    }
+
+    function registerExportCurrentPageImageHook(hook: (() => Promise<void>) | null) {
+        exportCurrentPageImageHook = hook
+    }
+
+    async function exportCurrentPageImage() {
+        if (!document.value) return
+        if (!exportCurrentPageImageHook) {
+            console.warn('[editorStore] exportCurrentPageImage: hook not registered')
+            return
+        }
+        await exportCurrentPageImageHook()
     }
 
     function setPageViewMode(mode: PageViewMode) {
@@ -895,6 +940,31 @@ export const useEditorStore = defineStore('editor', () => {
         if (id) selectedElementId.value = null
     }
 
+    function openAnnotationListPanel() {
+        rightPanelTab.value = 'annotations'
+    }
+
+    function focusAnnotation(annotationId: string) {
+        for (const key of Object.keys(annotationsMap)) {
+            const pageIdx = Number(key)
+            const ann = annotationsMap[pageIdx]?.find((a) => a.id === annotationId)
+            if (!ann) continue
+            setCurrentPage(pageIdx, { scrollIntoView: true })
+            setTool('SELECT')
+            selectAnnotation(annotationId)
+            rightPanelTab.value = 'annotations'
+            return
+        }
+    }
+
+    async function setAnnotationHidden(annotationId: string, hidden: boolean) {
+        const ok = await updateAnnotation(annotationId, { hidden })
+        if (ok && hidden && selectedAnnotationId.value === annotationId) {
+            selectedAnnotationId.value = null
+        }
+        return ok
+    }
+
     async function addAnnotation(
         annotationInput: Omit<AnnotationData, 'id' | 'createdAt' | 'updatedAt'>
     ): Promise<AnnotationData | null> {
@@ -1032,6 +1102,7 @@ export const useEditorStore = defineStore('editor', () => {
         printDialogVisible,
         // ── 注释状态 ──
         currentTool, annotationsMap, selectedAnnotationId,
+        rightPanelTab, annotationListScope, filteredAnnotationList, annotationCount,
         annotationColor, annotationOpacity, annotationLineWidth,
         pendingStampImage, hasPendingStamp,
         pageThumbnails, thumbnailLoadingPages, thumbnailLoadedCount, isGeneratingThumbnails,
@@ -1043,6 +1114,7 @@ export const useEditorStore = defineStore('editor', () => {
         // ── 原有方法 ──
         setDocument, setCurrentFile, setCurrentPage, setPageViewMode,
         registerScrollToPageInViewHook,
+        registerExportCurrentPageImageHook, exportCurrentPageImage,
         selectElement, setScale, fitToWidth, fitToPage,
         rotateViewClockwise, rotateViewCounterClockwise, resetViewRotation,
         registerEditorAreaResolver, setLoading,
@@ -1052,7 +1124,7 @@ export const useEditorStore = defineStore('editor', () => {
         // ── 注释方法 ──
         setTool, setAnnotationColor, setAnnotationOpacity,
         setAnnotationLineWidth, setPendingStampImage, clearPendingStampImage,
-        selectAnnotation,
+        selectAnnotation, openAnnotationListPanel, focusAnnotation, setAnnotationHidden,
         addAnnotation, updateAnnotation, deleteAnnotation,
         loadAllAnnotations, getAnnotationsByPage,
         exportWithAnnotations,

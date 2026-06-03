@@ -152,7 +152,14 @@
         <RibbonSep />
         <RibbonGroup label="管理">
           <RibbonButton label="删除注释" :icon="Delete" :disabled="!store.selectedAnnotationId" @click="handleDeleteAnnotation" />
-          <RibbonButton label="显示/隐藏" :icon="View" disabled tooltip="即将推出" @click="comingSoon" />
+          <RibbonButton
+              label="注释列表"
+              :icon="Memo"
+              :disabled="!store.document"
+              tooltip="打开右侧注释列表面板"
+              @click="store.openAnnotationListPanel()"
+          />
+          <RibbonButton label="全部显示" :icon="View" disabled tooltip="批量显示/隐藏即将推出" @click="comingSoon" />
         </RibbonGroup>
       </template>
 
@@ -239,7 +246,13 @@
         </RibbonGroup>
         <RibbonSep />
         <RibbonGroup label="导出">
-          <RibbonButton label="导出图片" :icon="PictureFilled" disabled tooltip="即将推出" @click="comingSoon" />
+          <RibbonButton
+              label="导出当前页"
+              :icon="PictureFilled"
+              :disabled="!store.document"
+              tooltip="将当前页导出为 PNG（含批注，保留当前视图旋转）"
+              @click="store.exportCurrentPageImage()"
+          />
         </RibbonGroup>
       </template>
 

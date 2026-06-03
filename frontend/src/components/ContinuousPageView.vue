@@ -196,7 +196,7 @@ watch(scale, () => {
   nextTick(setupObservers)
 })
 
-defineExpose({ getCanvasForPage, scrollToPageInView })
+defineExpose({ getCanvasForPage, scrollToPageInView, ensurePageMounted: mountPage })
 </script>
 
 <style scoped>

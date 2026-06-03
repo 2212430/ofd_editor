@@ -60,8 +60,8 @@
         </div>
       </div>
 
-      <!-- 右侧属性面板 -->
-      <PropertyPanel />
+      <!-- 右侧：属性 / 注释列表 -->
+      <RightSidePanel />
     </div>
 
     <!-- 底部状态栏 -->
@@ -110,16 +110,19 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Upload } from '@element-plus/icons-vue'
 import { useEditorStore } from '@/stores/editorStore'
-import { ofdApi } from '@/api/ofdApi'
+import { ofdApi, promptDownloadBlob } from '@/api/ofdApi'
+import {
+  buildCurrentPagePngFilename, dataUrlToBlob, EXPORT_PAGE_PIXEL_RATIO,
+} from '@/utils/exportPageImage'
 import Toolbar from '@/components/Toolbar.vue'
 import PagePanel from '@/components/PagePanel.vue'
 import CanvasEditor from '@/components/CanvasEditor.vue'
 import ContinuousPageView from '@/components/ContinuousPageView.vue'
-import PropertyPanel from '@/components/PropertyPanel.vue'
+import RightSidePanel from '@/components/RightSidePanel.vue'
 import PrintDialog from '@/components/PrintDialog.vue'
 import {
   buildPrintWindow, resolvePageIndices, qualityToPixelRatio,
@@ -171,8 +174,53 @@ async function waitForCanvasPaint() {
   })
 }
 
+async function handleExportCurrentPageImage() {
+  const doc = store.document
+  if (!doc) return
+
+  const pageIdx = store.currentPageIndex
+  const savedScale = store.scale
+
+  store.selectElement(null)
+  store.selectAnnotation(null)
+  store.setLoading(true, '正在导出当前页…')
+
+  try {
+    if (store.pageViewMode === 'continuous') {
+      continuousViewRef.value?.ensurePageMounted(pageIdx)
+      await waitForCanvasPaint()
+    }
+    store.setScale(1)
+    await waitForCanvasPaint()
+
+    const canvas = getActiveCanvas()
+    if (!canvas) {
+      ElMessage.warning('当前页画布未就绪，请稍后再试')
+      return
+    }
+
+    const cap = await canvas.captureForPrint(EXPORT_PAGE_PIXEL_RATIO, true)
+    if (!cap?.dataUrl) {
+      ElMessage.error('导出失败（可能存在跨域图片）')
+      return
+    }
+
+    const blob = await dataUrlToBlob(cap.dataUrl)
+    const filename = buildCurrentPagePngFilename(doc.title, pageIdx)
+    const saved = await promptDownloadBlob(blob, filename)
+    if (saved) ElMessage.success(`已导出第 ${pageIdx + 1} 页为 PNG`)
+  } catch (err: any) {
+    console.error('[export] 当前页导出失败', err)
+    ElMessage.error(err?.message ?? '导出失败')
+  } finally {
+    store.setScale(savedScale)
+    store.setLoading(false)
+  }
+}
+
 onMounted(() => {
   store.registerEditorAreaResolver(() => editorAreaRef.value ?? null)
+  store.registerExportCurrentPageImageHook(handleExportCurrentPageImage)
 
   store.registerThumbnailCaptureHook(async (pageIndex: number) => {
     const doc = store.document
@@ -184,6 +232,10 @@ onMounted(() => {
     const cap = await thumbCanvasRef.value.captureForPrint(THUMBNAIL_PIXEL_RATIO, true)
     return cap?.dataUrl ?? null
   })
+})
+
+onUnmounted(() => {
+  store.registerExportCurrentPageImageHook(null)
 })
 
 function triggerUpload() {

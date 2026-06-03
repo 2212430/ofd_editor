@@ -448,6 +448,10 @@ const pageAnnotations = computed<AnnotationData[]>(() =>
     store.annotationsMap[props.pageIndex] ?? [],
 )
 
+const visiblePageAnnotations = computed(() =>
+    pageAnnotations.value.filter((a) => !a.hidden),
+)
+
 function ensureActivePageForInteraction() {
   if (props.offscreen) return
   if (store.currentPageIndex !== props.pageIndex) {
@@ -455,7 +459,7 @@ function ensureActivePageForInteraction() {
   }
 }
 const annotationConfigs = computed(() =>
-    pageAnnotations.value.map(ann => ({
+    visiblePageAnnotations.value.map(ann => ({
       ann,
       highlightCfg:   ann.type === 'HIGHLIGHT'   ? getHighlightConfig(ann)   : null,
       underlineCfg:   ann.type === 'UNDERLINE'   ? getUnderlineConfig(ann)   : null,

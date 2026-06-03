@@ -76,6 +76,9 @@ public class AnnotationDTO {
     /** 最后修改时间戳 */
     private Long updatedAt;
 
+    /** 是否在编辑器中隐藏（不写入 OFD 语义，仅会话内管理） */
+    private Boolean hidden;
+
     // ==================== Getters & Setters ====================
 
     public String getId() { return id; }
@@ -131,6 +134,9 @@ public class AnnotationDTO {
 
     public Long getUpdatedAt() { return updatedAt; }
     public void setUpdatedAt(Long updatedAt) { this.updatedAt = updatedAt; }
+
+    public Boolean getHidden() { return hidden; }
+    public void setHidden(Boolean hidden) { this.hidden = hidden; }
 
     @Override
     public String toString() {

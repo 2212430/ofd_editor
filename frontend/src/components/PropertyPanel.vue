@@ -254,6 +254,7 @@ import { Pointer, RefreshLeft, Delete } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useEditorStore } from '@/stores/editorStore'
 import type { ElementData, AnnotationData } from '@/types'
+import { ANNOTATION_TYPE_LABEL as annTypeLabel } from '@/utils/annotationLabels'
 
 const store = useEditorStore()
 
@@ -303,20 +304,6 @@ watch(
     },
     { immediate: true }
 )
-
-// ─── 注释类型标签 ─────────────────────────────────────────────────────────
-const annTypeLabel: Record<string, string> = {
-  HIGHLIGHT:  '高亮',
-  UNDERLINE:  '下划线',
-  STRIKEOUT:  '删除线',
-  RECTANGLE:  '矩形',
-  CIRCLE:     '椭圆',
-  ARROW:      '箭头',
-  FREEHAND:   '手绘',
-  TEXTBOX:    '文本框',
-  STICKYNOTE: '便利贴',
-  STAMP:      '图章',
-}
 
 // ─── 更新注释（同步本地缓存 + 提交 store）────────────────────────────────
 function updateAnnotation(changes: Partial<AnnotationData>) {

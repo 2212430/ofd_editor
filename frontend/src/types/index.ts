@@ -104,6 +104,9 @@ export interface AnnotationData {
     // 图章相关（STAMP）
     stampBase64?: string
 
+    /** 是否在画布上隐藏（注释列表可切换；默认 false 为显示） */
+    hidden?: boolean
+
     // 时间戳
     createdAt?: number
     updatedAt?: number

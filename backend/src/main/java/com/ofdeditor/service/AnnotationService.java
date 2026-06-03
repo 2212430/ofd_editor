@@ -215,6 +215,7 @@ public class AnnotationService {
         merged.setLineWidth(firstNonNull(patch.getLineWidth(), existing.getLineWidth()));
         merged.setPathPoints(firstNonNull(patch.getPathPoints(), existing.getPathPoints()));
         merged.setStampBase64(firstNonNull(patch.getStampBase64(), existing.getStampBase64()));
+        merged.setHidden(patch.getHidden() != null ? patch.getHidden() : existing.getHidden());
         return merged;
     }
 
