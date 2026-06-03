@@ -14,6 +14,72 @@ export function sanitizeFilename(name: string): string {
     return trimmed.replace(/[\\/:*?"<>|]/g, '_')
 }
 
+/** 保证文件名以 .ofd 结尾 */
+export function ensureOfdFilename(name: string): string {
+    const base = sanitizeFilename(name).replace(/\.ofd$/i, '')
+    return `${base || 'export'}.ofd`
+}
+
+const OFD_SAVE_PICKER_TYPES = [
+    {
+        description: 'OFD 开放版式文档',
+        accept: { 'application/ofd': ['.ofd'], 'application/octet-stream': ['.ofd'] },
+    },
+]
+
+type SaveTarget =
+    | { mode: 'handle'; handle: FileSystemFileHandle; filename: string }
+    | { mode: 'download'; filename: string }
+
+/**
+ * 在用户点击时先选择保存位置/文件名（保留用户手势），供后续异步生成 Blob 再写入。
+ */
+export async function pickOfdSaveTarget(suggestedName: string): Promise<SaveTarget | null> {
+    const suggested = ensureOfdFilename(suggestedName)
+
+    if (typeof window.showSaveFilePicker === 'function') {
+        try {
+            const handle = await window.showSaveFilePicker({
+                suggestedName: suggested,
+                types: OFD_SAVE_PICKER_TYPES,
+            })
+            return { mode: 'handle', handle, filename: handle.name || suggested }
+        } catch (e) {
+            if ((e as DOMException)?.name === 'AbortError') return null
+        }
+    }
+
+    try {
+        const { value } = await ElMessageBox.prompt(
+            '请输入文件名。不支持选择文件夹时将保存到浏览器默认下载目录。',
+            '另存为',
+            {
+                inputValue: suggested,
+                confirmButtonText: '保存',
+                cancelButtonText: '取消',
+                inputPattern: /^[^\\/:*?"<>|]+$/,
+                inputErrorMessage: '文件名不能包含 \\ / : * ? " < > |',
+            },
+        )
+        const name = (value ?? '').trim()
+        if (!name) return null
+        return { mode: 'download', filename: ensureOfdFilename(name) }
+    } catch {
+        return null
+    }
+}
+
+/** 将 Blob 写入 pickOfdSaveTarget 选定的目标 */
+export async function writeBlobToSaveTarget(blob: Blob, target: SaveTarget): Promise<void> {
+    if (target.mode === 'handle') {
+        const writable = await target.handle.createWritable()
+        await writable.write(blob)
+        await writable.close()
+        return
+    }
+    downloadBlob(blob, target.filename)
+}
+
 function formatFileSize(bytes: number): string {
     if (bytes < 1024) return `${bytes} B`
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`

@@ -43,7 +43,7 @@
         <RibbonSep />
         <RibbonGroup label="输出">
           <RibbonButton label="打印" :icon="Printer" :disabled="!store.document" @click="store.printDialogVisible = true" />
-          <RibbonButton label="另存为" :icon="CopyDocument" disabled tooltip="即将推出" @click="comingSoon" />
+          <RibbonButton label="另存为" :icon="CopyDocument" :disabled="!store.document" @click="handleSaveAs" />
         </RibbonGroup>
         <RibbonSep />
         <RibbonGroup label="文档">
@@ -201,7 +201,7 @@
         </RibbonGroup>
         <RibbonSep />
         <RibbonGroup label="高级">
-          <RibbonButton label="图像替换" :icon="PictureFilled" disabled tooltip="即将推出" @click="comingSoon" />
+          <RibbonButton label="图片裁剪" :icon="Crop" disabled tooltip="即将推出" @click="comingSoon" />
           <RibbonButton label="路径编辑" :icon="EditPen" disabled tooltip="即将推出" @click="comingSoon" />
         </RibbonGroup>
       </template>
@@ -263,7 +263,10 @@ import {
   Lock, Key, Stamp, Medal, QuestionFilled, Clock,
 } from '@element-plus/icons-vue'
 import { useEditorStore } from '@/stores/editorStore'
-import { ofdApi, downloadBlob, promptDownloadBlob } from '@/api/ofdApi'
+import {
+  ofdApi, downloadBlob, promptDownloadBlob,
+  pickOfdSaveTarget, writeBlobToSaveTarget,
+} from '@/api/ofdApi'
 import RibbonButton from '@/components/RibbonButton.vue'
 import DocumentPropertiesDialog from '@/components/DocumentPropertiesDialog.vue'
 
@@ -509,6 +512,25 @@ async function handleSaveOfd() {
     ElMessage.success('保存成功！')
   } catch (err: any) {
     ElMessage.error(err.message || '保存失败')
+  } finally {
+    store.setLoading(false)
+  }
+}
+
+async function handleSaveAs() {
+  if (!store.document) return
+
+  const target = await pickOfdSaveTarget(store.document.title)
+  if (!target) return
+
+  store.setLoading(true, '正在生成 OFD 文件...')
+  try {
+    const blob = await ofdApi.saveOfd(store.getDocumentForSave()!)
+    await writeBlobToSaveTarget(blob, target)
+    store.markNewElementsPersisted()
+    ElMessage.success(`已另存为：${target.filename}`)
+  } catch (err: any) {
+    ElMessage.error(err.message || '另存为失败')
   } finally {
     store.setLoading(false)
   }
