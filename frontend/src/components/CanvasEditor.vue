@@ -3,9 +3,10 @@
       ref="wrapperRef"
       class="canvas-wrapper"
       :class="{
-        'cursor-crosshair': store.isAnnotationTool,
-        'cursor-hand': store.isHandTool,
-        'cursor-grabbing': store.isHandTool && isPanning,
+        'canvas-wrapper--offscreen': offscreen,
+        'cursor-crosshair': !offscreen && store.isAnnotationTool,
+        'cursor-hand': !offscreen && store.isHandTool,
+        'cursor-grabbing': !offscreen && store.isHandTool && isPanning,
       }"
   >
     <v-stage
@@ -86,7 +87,7 @@
         </template>
 
         <v-transformer
-            v-if="store.isSelectTool"
+            v-if="!offscreen && store.isSelectTool"
             ref="transformerRef"
             :config="transformerConfig"
         />
@@ -239,7 +240,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onUnmounted, reactive, ref, watch, withDefaults } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useEditorStore } from '@/stores/editorStore'
 import type { PageData, ElementData, AnnotationData } from '@/types'
@@ -247,8 +248,20 @@ import type { PageData, ElementData, AnnotationData } from '@/types'
 // ─────────────────────────────────────────────
 // Props / Store
 // ─────────────────────────────────────────────
-const props = defineProps<{ page: PageData; pageIndex: number }>()
+const props = withDefaults(
+    defineProps<{
+      page: PageData
+      pageIndex: number
+      /** 离屏渲染：仅用于缩略图截图，不响应交互 */
+      offscreen?: boolean
+      /** 固定缩放（离屏截图时用 1，避免影响主画布 store.scale） */
+      fixedScale?: number
+    }>(),
+    { offscreen: false },
+)
 const store = useEditorStore()
+
+const renderScale = computed(() => props.fixedScale ?? store.scale)
 
 // ─────────────────────────────────────────────
 // Konva 引用
@@ -281,7 +294,7 @@ watch(
         const stage = stageRef.value?.getNode?.()
         if (!stage) return
 
-        const page = store.currentPage
+        const page = props.page
         if (page) {
           // Konva 节点用 element.id 作为内部 id 属性；按 id 找回节点，
           // 直接把最新 store 数据写到节点上，绕开 vue-konva deep watcher 漏发的情况
@@ -325,12 +338,13 @@ const RESIZABLE_TYPES = ['RECTANGLE', 'CIRCLE', 'TEXTBOX', 'STICKYNOTE', 'STAMP'
 // ─────────────────────────────────────────────
 // Stage 基础配置
 // ─────────────────────────────────────────────
-const canvasWidth  = computed(() => props.page.width  * MM_TO_PX * store.scale)
-const canvasHeight = computed(() => props.page.height * MM_TO_PX * store.scale)
+const canvasWidth  = computed(() => props.page.width  * MM_TO_PX * renderScale.value)
+const canvasHeight = computed(() => props.page.height * MM_TO_PX * renderScale.value)
 
 const stageConfig = computed(() => ({
   width:  canvasWidth.value,
   height: canvasHeight.value,
+  listening: !props.offscreen,
 }))
 
 const bgConfig = computed(() => ({
@@ -372,8 +386,8 @@ const annotationTransformerConfig = computed(() => ({
 // ─────────────────────────────────────────────
 // 单位换算
 // ─────────────────────────────────────────────
-function s(v: number)     { return v * MM_TO_PX * store.scale }
-function px2mm(v: number) { return v / MM_TO_PX / store.scale }
+function s(v: number)     { return v * MM_TO_PX * renderScale.value }
+function px2mm(v: number) { return v / MM_TO_PX / renderScale.value }
 
 // ─────────────────────────────────────────────
 // OFD 元素图片缓存
@@ -405,9 +419,13 @@ watch(
 // ─────────────────────────────────────────────
 // 注释数据
 // ─────────────────────────────────────────────
-const currentPageAnnotations = computed<AnnotationData[]>(() => store.currentPageAnnotations)
+const pageAnnotations = computed<AnnotationData[]>(() =>
+    props.offscreen
+        ? (store.annotationsMap[props.pageIndex] ?? [])
+        : store.currentPageAnnotations,
+)
 const annotationConfigs = computed(() =>
-    currentPageAnnotations.value.map(ann => ({
+    pageAnnotations.value.map(ann => ({
       ann,
       highlightCfg:   ann.type === 'HIGHLIGHT'   ? getHighlightConfig(ann)   : null,
       underlineCfg:   ann.type === 'UNDERLINE'   ? getUnderlineConfig(ann)   : null,
@@ -441,7 +459,7 @@ function toRawBase64(dataUrl: string): string {
 }
 
 watch(
-    currentPageAnnotations,
+    pageAnnotations,
     (anns) => {
       for (const ann of anns) {
         if (ann.type !== 'STAMP' || !ann.stampBase64 || stampImageMap[ann.id]) continue
@@ -469,6 +487,7 @@ async function refreshElementTransformer(elementId: string) {
 }
 
 watch(() => store.selectedElementId, async (id) => {
+  if (props.offscreen) return
   if (id) await refreshElementTransformer(id)
   else {
     await nextTick()
@@ -483,6 +502,7 @@ watch(() => store.selectedElementId, async (id) => {
 // 注释 Transformer 跟踪
 // ─────────────────────────────────────────────
 watch(() => store.selectedAnnotationId, async (id) => {
+  if (props.offscreen) return
   await nextTick()
   const transformer = annotationTransformerRef.value?.getNode()
   if (!transformer) return
@@ -699,6 +719,7 @@ onUnmounted(() => {
 // 鼠标事件
 // ─────────────────────────────────────────────
 function handleMouseDown(e: any) {
+  if (props.offscreen) return
   if (store.isHandTool) {
     if (e.evt?.button !== 0) return
     const sc = getScrollContainer()
@@ -758,6 +779,7 @@ function handleMouseLeave() {
 }
 
 function handleStageClick(e: any) {
+  if (props.offscreen) return
   if (suppressClick.value) {
     suppressClick.value = false
     return
@@ -862,7 +884,7 @@ function handleAnnotationClick(e: any, id: string) {
 
 function handleAnnotationDblClick(e: any, id: string) {
   e.cancelBubble = true
-  const ann = currentPageAnnotations.value.find(a => a.id === id)
+  const ann = pageAnnotations.value.find(a => a.id === id)
   if (ann && ['TEXTBOX', 'STICKYNOTE'].includes(ann.type)) openTextEdit(ann)
 }
 
@@ -1180,7 +1202,7 @@ function getCurrencySplitParts(content: string): { prefix: string; symbol: strin
 
 /** 数字段 x：前缀宽 + max(OFD 字距, Web ¥ 实际宽) */
 function currencyTailOffsetPx(prefix: string, fsMm: number, glyphAdvanceMm?: number): number {
-  const sc = MM_TO_PX * store.scale
+  const sc = MM_TO_PX * renderScale.value
   const prefixW = prefix ? estimateNaturalWidthMm(prefix, fsMm) * sc : 0
   const ofdGap = typeof glyphAdvanceMm === 'number' && glyphAdvanceMm > 0
       ? glyphAdvanceMm * sc : fsMm * sc * 0.55
@@ -1208,10 +1230,10 @@ function resolveTextFontPx(element: ElementData): number {
   const fsMm    = element.fontSize ?? 3
   const wMm     = element.width ?? 0
   const hMm     = element.height ?? 0
-  const wPx     = wMm > 0 ? wMm * MM_TO_PX * store.scale : 0
-  const hPx     = hMm > 0 ? hMm * MM_TO_PX * store.scale : 0
+  const wPx     = wMm > 0 ? wMm * MM_TO_PX * renderScale.value : 0
+  const hPx     = hMm > 0 ? hMm * MM_TO_PX * renderScale.value : 0
   const isVertical = element.verticalLayout === true || (hasNl && wMm > 0 && hMm > 0 && hMm > wMm * 1.5)
-  let fsPx = fsMm * MM_TO_PX * store.scale
+  let fsPx = fsMm * MM_TO_PX * renderScale.value
   const userOverride = element.fontSizeOverridden === true
   if (isVertical && !userOverride && wPx > 0) fsPx = Math.min(fsPx, wPx * 0.92)
   else if (!userOverride && !hasNl && content.length <= 20 && hPx > 2 && (wPx <= 0 || hPx < wPx * 1.5)) {
@@ -1283,9 +1305,9 @@ function getTextConfig(element: ElementData) {
   const isPasswordGrid = element.passwordGrid === true
   const isMultiLineHorizontal = !isVertical && hasNl && wMm > 0 && !isPasswordGrid
 
-  let fsPx = fsMm * MM_TO_PX * store.scale
-  const hPx = hMm > 0 ? hMm * MM_TO_PX * store.scale : 0
-  const wPx = wMm > 0 ? wMm * MM_TO_PX * store.scale : 0
+  let fsPx = fsMm * MM_TO_PX * renderScale.value
+  const hPx = hMm > 0 ? hMm * MM_TO_PX * renderScale.value : 0
+  const wPx = wMm > 0 ? wMm * MM_TO_PX * renderScale.value : 0
   // 用户在属性面板手动改过字号 → 绝对尊重用户输入，跳过任何按外接框尺寸的兜底裁剪
   const userOverride = element.fontSizeOverridden === true
   if (isVertical && !userOverride) {
@@ -1306,21 +1328,21 @@ function getTextConfig(element: ElementData) {
       && content.length > 1 && content.length <= 8 && !isNumericOrAmount && !isCurrencyAmount
       && !content.includes('：') && !content.includes(':')
   if (isStretchLabel) {
-    const fsMmRendered = fsPx / (MM_TO_PX * store.scale)
+    const fsMmRendered = fsPx / (MM_TO_PX * renderScale.value)
     const naturalMm    = estimateNaturalWidthMm(content, fsMmRendered)
     const gapMm        = wMm - naturalMm
     if (gapMm > 0.05 && gapMm < wMm * 0.35) {
       const lsMm = gapMm / (content.length - 1)
-      letterSpacing = Math.min(lsMm, fsMmRendered * 0.6) * MM_TO_PX * store.scale
+      letterSpacing = Math.min(lsMm, fsMmRendered * 0.6) * MM_TO_PX * renderScale.value
     }
   } else if (isCurrencyAmount && !isVertical && !isPasswordGrid && !hasNl) {
-    const fsMmR = fsPx / (MM_TO_PX * store.scale)
+    const fsMmR = fsPx / (MM_TO_PX * renderScale.value)
     const ofdAdv = element.glyphAdvanceMm
     if (typeof ofdAdv === 'number' && ofdAdv > 0) {
       const lsMm = ofdAdv - fsMmR * 0.32
-      if (lsMm > 0.02) letterSpacing = lsMm * MM_TO_PX * store.scale
+      if (lsMm > 0.02) letterSpacing = lsMm * MM_TO_PX * renderScale.value
     } else {
-      letterSpacing = fsMm * 0.15 * MM_TO_PX * store.scale
+      letterSpacing = fsMm * 0.15 * MM_TO_PX * renderScale.value
     }
   }
 
@@ -1367,7 +1389,7 @@ function getTextConfig(element: ElementData) {
 function getPathConfig(element: ElementData) {
   const e          = element as any
   const isSelected = store.selectedElementId === element.id
-  const sc         = MM_TO_PX * store.scale
+  const sc         = MM_TO_PX * renderScale.value
   // OFD 矢量：纯填充/纯描边由 path*Enabled 与线宽控制；无描边时不得强制灰色描边
   const strokeOff  = e.pathStrokeEnabled === false
   const fillOff    = e.pathFillEnabled === false
@@ -1481,9 +1503,9 @@ function getFallbackConfig(element: ElementData) {
 // ─────────────────────────────────────────────
 // 注释 Config
 // ─────────────────────────────────────────────
-function elementDraggable() { return store.isSelectTool }
+function elementDraggable() { return store.isSelectTool && !props.offscreen }
 
-function annDraggable() { return store.currentTool === 'SELECT' }
+function annDraggable() { return store.currentTool === 'SELECT' && !props.offscreen }
 
 function getAnnotationGroupConfig(ann: AnnotationData) {
   return {
@@ -1638,7 +1660,7 @@ function getTextBoxTextConfig(ann: AnnotationData) {
     width:         s(ann.width)  - 8,
     height:        s(ann.height) - 8,
     text:          ann.content   ?? '',
-    fontSize:      (ann.fontSize ?? 12) * MM_TO_PX * store.scale,
+    fontSize:      (ann.fontSize ?? 12) * MM_TO_PX * renderScale.value,
     fontFamily:    'Microsoft YaHei, sans-serif',
     fill:          ann.fontColor ?? '#000000',
     align:         'left'  as const,
@@ -1668,7 +1690,7 @@ function getStickyNoteTextConfig(ann: AnnotationData) {
     width:         s(ann.width)  - 12,
     height:        s(ann.height) - 12,
     text:          ann.content   ?? '',
-    fontSize:      (ann.fontSize ?? 12) * MM_TO_PX * store.scale,
+    fontSize:      (ann.fontSize ?? 12) * MM_TO_PX * renderScale.value,
     fontFamily:    'Microsoft YaHei, sans-serif',
     fill:          ann.fontColor ?? '#333333',
     align:         'left'  as const,
@@ -1703,7 +1725,7 @@ function allImagesReady(): boolean {
       if (src && !imageMap[el.id] && !imageErrorMap[el.id]) return false
     }
   }
-  for (const ann of store.currentPageAnnotations) {
+  for (const ann of pageAnnotations.value) {
     if (ann.type === 'STAMP' && ann.stampBase64 && !stampImageMap[ann.id]) return false
   }
   return true
@@ -1764,5 +1786,9 @@ defineExpose({ captureForPrint })
 
 .canvas-wrapper.cursor-crosshair {
   cursor: crosshair;
+}
+
+.canvas-wrapper--offscreen {
+  pointer-events: none;
 }
 </style>

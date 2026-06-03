@@ -5,12 +5,12 @@
       <span class="page-count">{{ store.document?.pageCount ?? 0 }} 页</span>
     </div>
     <div v-if="store.document" class="panel-hint">
-      {{ store.isGeneratingThumbnails ? '正在生成页面预览…' : '拖动缩略图可调整顺序' }}
+      {{ panelHint }}
     </div>
 
     <div v-if="!store.document" class="empty-tip">暂无文档</div>
 
-    <div v-else class="page-list">
+    <div v-else ref="pageListRef" class="page-list">
       <div
           v-for="(page, index) in store.document.pages"
           :key="page.id ?? `page-${index}`"
@@ -20,6 +20,7 @@
             dragging: dragFromIndex === index,
             'drag-over': dragOverIndex === index && dragFromIndex !== index,
           }"
+          :data-page-index="index"
           draggable="true"
           @click="store.setCurrentPage(index)"
           @dragstart="onDragStart(index, $event)"
@@ -38,10 +39,11 @@
               class="thumb-img"
               alt=""
               draggable="false"
+              loading="lazy"
           />
           <template v-else>
             <el-icon class="page-icon"><Document /></el-icon>
-            <span v-if="store.isGeneratingThumbnails" class="thumb-loading">预览生成中</span>
+            <span v-if="store.isPageThumbnailLoading(index)" class="thumb-loading">加载中…</span>
           </template>
           <span class="element-count">{{ page.elements.length }} 个元素</span>
           <button
@@ -60,7 +62,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Document, CopyDocument } from '@element-plus/icons-vue'
 import { useEditorStore } from '@/stores/editorStore'
@@ -68,6 +70,78 @@ import { useEditorStore } from '@/stores/editorStore'
 const store = useEditorStore()
 const dragFromIndex = ref<number | null>(null)
 const dragOverIndex = ref<number | null>(null)
+const pageListRef = ref<HTMLElement>()
+let thumbObserver: IntersectionObserver | null = null
+
+const panelHint = computed(() => {
+  const total = store.document?.pageCount ?? 0
+  const loaded = store.thumbnailLoadedCount
+  if (store.isGeneratingThumbnails) {
+    return `预览加载中 ${loaded}/${total}…`
+  }
+  if (total > 0 && loaded < total) {
+    return `已加载 ${loaded}/${total} 页预览 · 滚动查看更多`
+  }
+  return '拖动缩略图可调整顺序'
+})
+
+function observeVisibleThumbnails() {
+  thumbObserver?.disconnect()
+  if (!pageListRef.value) return
+
+  thumbObserver = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue
+          const idx = Number((entry.target as HTMLElement).dataset.pageIndex)
+          if (!Number.isNaN(idx)) store.requestPageThumbnail(idx)
+        }
+      },
+      {
+        root: pageListRef.value,
+        rootMargin: '120px 0px',
+        threshold: 0.01,
+      },
+  )
+
+  const items = pageListRef.value.querySelectorAll<HTMLElement>('[data-page-index]')
+  items.forEach((el) => thumbObserver!.observe(el))
+}
+
+function prefetchAroundCurrent() {
+  const cur = store.currentPageIndex
+  store.requestPageThumbnail(cur)
+  store.requestPageThumbnail(cur - 1)
+  store.requestPageThumbnail(cur + 1)
+  store.requestPageThumbnail(0)
+}
+
+onMounted(() => {
+  nextTick(() => {
+    observeVisibleThumbnails()
+    prefetchAroundCurrent()
+  })
+})
+
+onUnmounted(() => {
+  thumbObserver?.disconnect()
+  thumbObserver = null
+})
+
+watch(
+    () => store.document?.pageCount,
+    () => {
+      nextTick(() => {
+        observeVisibleThumbnails()
+        prefetchAroundCurrent()
+      })
+    },
+)
+
+watch(
+    () => store.currentPageIndex,
+    () => prefetchAroundCurrent(),
+)
 
 function onDragStart(index: number, e: DragEvent) {
   dragFromIndex.value = index
@@ -97,6 +171,7 @@ function onDrop(toIndex: number, e: DragEvent) {
   store.movePage(from, toIndex)
   ElMessage.success(`已将第 ${from + 1} 页移动到第 ${toIndex + 1} 位`)
   onDragEnd()
+  nextTick(observeVisibleThumbnails)
 }
 
 function onDragEnd() {
@@ -109,6 +184,7 @@ async function handleCopyPage(index: number) {
     const newIndex = await store.copyPage(index)
     if (newIndex !== undefined) {
       ElMessage.success(`已复制第 ${index + 1} 页为第 ${newIndex + 1} 页`)
+      nextTick(observeVisibleThumbnails)
     }
   } catch (err: any) {
     ElMessage.error(err?.message || '复制页面失败')
@@ -149,6 +225,7 @@ async function handleCopyPage(index: number) {
   border-bottom: 1px solid #ffe8cc;
   text-align: center;
   flex-shrink: 0;
+  line-height: 1.4;
 }
 
 .page-count {

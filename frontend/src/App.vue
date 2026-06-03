@@ -77,11 +77,26 @@
            style="display:none" @change="handleWelcomeUpload" />
     <input ref="pdfRef" type="file" accept=".pdf"
            style="display:none" @change="handleWelcomePdf" />
+
+    <!-- 离屏画布：仅供左侧缩略图截图，不切换主编辑区当前页 -->
+    <div
+        v-if="store.document && thumbCapturePage"
+        class="thumb-capture-host"
+        aria-hidden="true"
+    >
+      <CanvasEditor
+          ref="thumbCanvasRef"
+          offscreen
+          :fixed-scale="1"
+          :page="thumbCapturePage"
+          :page-index="thumbCapturePageIndex"
+      />
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Upload } from '@element-plus/icons-vue'
 import { useEditorStore } from '@/stores/editorStore'
@@ -100,40 +115,35 @@ const store = useEditorStore()
 const uploadRef = ref<HTMLInputElement>()
 const pdfRef = ref<HTMLInputElement>()
 const canvasRef = ref<InstanceType<typeof CanvasEditor> | null>(null)
+const thumbCanvasRef = ref<InstanceType<typeof CanvasEditor> | null>(null)
 const editorAreaRef = ref<HTMLElement>()
+const thumbCapturePageIndex = ref(0)
+const thumbCapturePage = computed(() =>
+    store.document?.pages[thumbCapturePageIndex.value] ?? null,
+)
 
-/** 左侧缩略图：逐页截图（低分辨率），打开文档后后台生成 */
+/** 左侧缩略图：按需截取单页（低分辨率） */
 const THUMBNAIL_PIXEL_RATIO = 0.22
+
+async function waitForCanvasPaint() {
+  await nextTick()
+  await new Promise<void>((r) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => r()))
+  })
+}
 
 onMounted(() => {
   store.registerEditorAreaResolver(() => editorAreaRef.value ?? null)
 
-  store.registerThumbnailGenerationHook(async () => {
+  store.registerThumbnailCaptureHook(async (pageIndex: number) => {
     const doc = store.document
-    if (!doc || !canvasRef.value) return
+    if (!doc || !thumbCanvasRef.value) return null
+    if (pageIndex < 0 || pageIndex >= doc.pageCount) return null
 
-    const savedScale = store.scale
-    const savedPage = store.currentPageIndex
-    store.selectElement(null)
-    store.selectAnnotation(null)
-    store.setScale(1)
-
-    try {
-      for (let i = 0; i < doc.pageCount; i++) {
-        store.setCurrentPage(i)
-        await nextTick()
-        await new Promise<void>((r) => {
-          requestAnimationFrame(() => requestAnimationFrame(() => r()))
-        })
-        const cap = await canvasRef.value.captureForPrint(THUMBNAIL_PIXEL_RATIO, true)
-        if (cap?.dataUrl) {
-          store.setPageThumbnail(i, cap.dataUrl)
-        }
-      }
-    } finally {
-      store.setScale(savedScale)
-      store.setCurrentPage(savedPage)
-    }
+    thumbCapturePageIndex.value = pageIndex
+    await waitForCanvasPaint()
+    const cap = await thumbCanvasRef.value.captureForPrint(THUMBNAIL_PIXEL_RATIO, true)
+    return cap?.dataUrl ?? null
   })
 })
 
@@ -365,6 +375,17 @@ async function handleWelcomePdf(e: Event) {
   flex-shrink: 0;
 }
 .status-left { display: flex; align-items: center; gap: 8px; }
+
+/* 缩略图离屏渲染：不参与布局、不可见，避免截图时主画布闪动 */
+.thumb-capture-host {
+  position: fixed;
+  left: -100000px;
+  top: 0;
+  overflow: hidden;
+  visibility: hidden;
+  pointer-events: none;
+  z-index: -1;
+}
 .status-sep { color: #ccc; }
 .version { color: #aaa; }
 </style>

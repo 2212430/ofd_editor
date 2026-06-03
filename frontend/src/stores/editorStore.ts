@@ -44,10 +44,15 @@ export const useEditorStore = defineStore('editor', () => {
     /** 待放置的图章图片（data URL），选择图片后点击页面放置 */
     const pendingStampImage = ref<string | null>(null)
 
-    /** 左侧页面列表缩略图（pageIndex → PNG dataURL），打开文档时生成，编辑后不自动刷新 */
+    /** 左侧页面列表缩略图（pageIndex → PNG dataURL），随滚动按需加载 */
     const pageThumbnails = reactive<Record<number, string>>({})
+    /** 正在生成缩略图的页码 */
+    const thumbnailLoadingPages = reactive<Record<number, boolean>>({})
     const isGeneratingThumbnails = ref(false)
-    let thumbnailGenerationHook: (() => Promise<void>) | null = null
+    const thumbnailQueue: number[] = []
+    let thumbnailWorkerRunning = false
+    let thumbnailCaptureHook: ((pageIndex: number) => Promise<string | null>) | null = null
+    const thumbnailRefreshTimers: Partial<Record<number, ReturnType<typeof setTimeout>>> = {}
 
     // ==================== 计算属性 ====================
     const currentPage = computed<PageData | null>(() =>
@@ -230,6 +235,7 @@ export const useEditorStore = defineStore('editor', () => {
         selectedAnnotationId.value = null
         currentTool.value = 'SELECT'
         saveToHistory()
+        schedulePageThumbnailRefresh(pageIndex, 300)
         return id
     }
 
@@ -268,25 +274,158 @@ export const useEditorStore = defineStore('editor', () => {
         for (const key of Object.keys(pageThumbnails)) {
             delete pageThumbnails[Number(key)]
         }
+        for (const key of Object.keys(thumbnailLoadingPages)) {
+            delete thumbnailLoadingPages[Number(key)]
+        }
+        thumbnailQueue.length = 0
+        clearThumbnailRefreshTimers()
+    }
+
+    function clearThumbnailRefreshTimers() {
+        for (const key of Object.keys(thumbnailRefreshTimers)) {
+            const t = thumbnailRefreshTimers[Number(key)]
+            if (t) clearTimeout(t)
+            delete thumbnailRefreshTimers[Number(key)]
+        }
+    }
+
+    /** 清除某页缓存，便于重新截图 */
+    function invalidatePageThumbnail(pageIndex: number) {
+        delete pageThumbnails[pageIndex]
+        delete thumbnailLoadingPages[pageIndex]
+        const qIdx = thumbnailQueue.indexOf(pageIndex)
+        if (qIdx >= 0) thumbnailQueue.splice(qIdx, 1)
+    }
+
+    /** 立即作废并重新加入生成队列 */
+    function refreshPageThumbnail(pageIndex: number) {
+        if (!document.value || !thumbnailCaptureHook) return
+        if (pageIndex < 0 || pageIndex >= document.value.pageCount) return
+        invalidatePageThumbnail(pageIndex)
+        requestPageThumbnail(pageIndex)
+    }
+
+    /** 编辑后防抖刷新缩略图（避免拖拽时每帧截图） */
+    function schedulePageThumbnailRefresh(pageIndex: number, delayMs = 500) {
+        if (!document.value) return
+        if (pageIndex < 0 || pageIndex >= document.value.pageCount) return
+        const prev = thumbnailRefreshTimers[pageIndex]
+        if (prev) clearTimeout(prev)
+        thumbnailRefreshTimers[pageIndex] = setTimeout(() => {
+            delete thumbnailRefreshTimers[pageIndex]
+            refreshPageThumbnail(pageIndex)
+        }, delayMs)
     }
 
     function setPageThumbnail(pageIndex: number, dataUrl: string) {
         pageThumbnails[pageIndex] = dataUrl
+        delete thumbnailLoadingPages[pageIndex]
     }
 
-    function registerThumbnailGenerationHook(hook: () => Promise<void>) {
-        thumbnailGenerationHook = hook
+    function registerThumbnailCaptureHook(
+        hook: (pageIndex: number) => Promise<string | null>
+    ) {
+        thumbnailCaptureHook = hook
     }
 
-    async function generatePageThumbnails() {
-        if (!document.value || isGeneratingThumbnails.value || !thumbnailGenerationHook) return
+    function isPageThumbnailLoading(pageIndex: number): boolean {
+        return !!thumbnailLoadingPages[pageIndex] && !pageThumbnails[pageIndex]
+    }
+
+    const thumbnailLoadedCount = computed(() => Object.keys(pageThumbnails).length)
+
+    function requestPageThumbnail(pageIndex: number) {
+        if (!document.value || !thumbnailCaptureHook) return
+        if (pageIndex < 0 || pageIndex >= document.value.pageCount) return
+        if (pageThumbnails[pageIndex] || thumbnailLoadingPages[pageIndex]) return
+        if (thumbnailQueue.includes(pageIndex)) return
+
+        thumbnailQueue.push(pageIndex)
+        void processThumbnailQueue()
+    }
+
+    async function processThumbnailQueue() {
+        if (thumbnailWorkerRunning || !thumbnailCaptureHook || !document.value) return
+        thumbnailWorkerRunning = true
         isGeneratingThumbnails.value = true
+
         try {
-            await thumbnailGenerationHook()
-        } catch (e) {
-            console.warn('[editorStore] 缩略图生成失败:', e)
+            while (thumbnailQueue.length > 0) {
+                const pageIndex = thumbnailQueue.shift()!
+                if (pageThumbnails[pageIndex]) continue
+                if (pageIndex < 0 || pageIndex >= document.value!.pageCount) continue
+
+                thumbnailLoadingPages[pageIndex] = true
+                try {
+                    const dataUrl = await thumbnailCaptureHook(pageIndex)
+                    if (dataUrl) pageThumbnails[pageIndex] = dataUrl
+                } catch (e) {
+                    console.warn(`[editorStore] 缩略图生成失败 page=${pageIndex}:`, e)
+                } finally {
+                    delete thumbnailLoadingPages[pageIndex]
+                }
+            }
         } finally {
-            isGeneratingThumbnails.value = false
+            thumbnailWorkerRunning = false
+            isGeneratingThumbnails.value = thumbnailQueue.length > 0
+            if (isGeneratingThumbnails.value) void processThumbnailQueue()
+        }
+    }
+
+    /** 页面顺序变更后，按「新下标 → 旧下标」映射保留已有缩略图 */
+    function remapPageThumbnails(oldIndexAtNewPos: number[]) {
+        const prev: Record<number, string> = {}
+        for (const key of Object.keys(pageThumbnails)) {
+            prev[Number(key)] = pageThumbnails[Number(key)]
+        }
+        for (const key of Object.keys(pageThumbnails)) {
+            delete pageThumbnails[Number(key)]
+        }
+        oldIndexAtNewPos.forEach((oldIdx, newIdx) => {
+            if (prev[oldIdx] !== undefined) pageThumbnails[newIdx] = prev[oldIdx]
+        })
+    }
+
+    function buildOrderAfterMove(fromIndex: number, toIndex: number, count: number): number[] {
+        const order = Array.from({ length: count }, (_, i) => i)
+        const [moved] = order.splice(fromIndex, 1)
+        order.splice(toIndex, 0, moved)
+        return order
+    }
+
+    function shiftThumbnailsAfterInsert(insertAt: number, copyFromIndex?: number) {
+        const n = document.value?.pageCount ?? 0
+        const prev: Record<number, string> = {}
+        for (const key of Object.keys(pageThumbnails)) {
+            prev[Number(key)] = pageThumbnails[Number(key)]
+        }
+        for (const key of Object.keys(pageThumbnails)) {
+            delete pageThumbnails[Number(key)]
+        }
+        for (let newIdx = 0; newIdx < n; newIdx++) {
+            if (newIdx === insertAt) {
+                if (copyFromIndex !== undefined && prev[copyFromIndex] !== undefined) {
+                    pageThumbnails[newIdx] = prev[copyFromIndex]
+                }
+                continue
+            }
+            const oldIdx = newIdx < insertAt ? newIdx : newIdx - 1
+            if (prev[oldIdx] !== undefined) pageThumbnails[newIdx] = prev[oldIdx]
+        }
+    }
+
+    function shiftThumbnailsAfterDelete(deletedIndex: number) {
+        const n = document.value?.pageCount ?? 0
+        const prev: Record<number, string> = {}
+        for (const key of Object.keys(pageThumbnails)) {
+            prev[Number(key)] = pageThumbnails[Number(key)]
+        }
+        for (const key of Object.keys(pageThumbnails)) {
+            delete pageThumbnails[Number(key)]
+        }
+        for (let newIdx = 0; newIdx < n; newIdx++) {
+            const oldIdx = newIdx < deletedIndex ? newIdx : newIdx + 1
+            if (prev[oldIdx] !== undefined) pageThumbnails[newIdx] = prev[oldIdx]
         }
     }
 
@@ -401,6 +540,7 @@ export const useEditorStore = defineStore('editor', () => {
 
         Object.assign(element, next)
         saveToHistory()
+        schedulePageThumbnailRefresh(pageIndex)
     }
 
     function resetElement(pageIndex: number, elementId: string) {
@@ -414,6 +554,7 @@ export const useEditorStore = defineStore('editor', () => {
             page!.elements.splice(idx, 1)
             if (selectedElementId.value === elementId) selectedElementId.value = null
             saveToHistory()
+            schedulePageThumbnailRefresh(pageIndex)
             return
         }
 
@@ -428,6 +569,7 @@ export const useEditorStore = defineStore('editor', () => {
         element.scaleY = 1
         element.isDirty = false
         saveToHistory()
+        schedulePageThumbnailRefresh(pageIndex)
     }
 
     function insertPage(position: number) {
@@ -443,6 +585,7 @@ export const useEditorStore = defineStore('editor', () => {
         document.value.pageCount += 1
         document.value.pages.forEach((p, i) => { p.pageIndex = i })
         remapAnnotationsAfterInsert(position, [])
+        shiftThumbnailsAfterInsert(position)
         if (currentPageIndex.value >= position) {
             currentPageIndex.value += 1
         }
@@ -459,6 +602,7 @@ export const useEditorStore = defineStore('editor', () => {
             currentPageIndex.value = Math.max(0, currentPageIndex.value - 1)
         }
         currentPageIndex.value = Math.min(currentPageIndex.value, document.value.pageCount - 1)
+        shiftThumbnailsAfterDelete(pageIndex)
         saveToHistory()
     }
 
@@ -474,6 +618,7 @@ export const useEditorStore = defineStore('editor', () => {
         pages.splice(toIndex, 0, page)
         pages.forEach((p, i) => { p.pageIndex = i })
         remapAnnotationsAfterMove(fromIndex, toIndex)
+        remapPageThumbnails(buildOrderAfterMove(fromIndex, toIndex, n))
         adjustCurrentPageAfterMove(fromIndex, toIndex)
         saveToHistory()
     }
@@ -508,6 +653,7 @@ export const useEditorStore = defineStore('editor', () => {
         const oldCur = currentPageIndex.value
         const newCur = newOrder.indexOf(oldCur)
         currentPageIndex.value = newCur >= 0 ? newCur : 0
+        remapPageThumbnails(newOrder)
         saveToHistory()
     }
 
@@ -544,6 +690,7 @@ export const useEditorStore = defineStore('editor', () => {
         })
 
         remapAnnotationsAfterInsert(position, copiedAnns)
+        shiftThumbnailsAfterInsert(position, sourceIndex)
 
         if (fileId.value && copiedAnns.length > 0) {
             const persisted: AnnotationData[] = []
@@ -643,6 +790,7 @@ export const useEditorStore = defineStore('editor', () => {
         historyIndex.value -= 1
         restoreFromHistory(historyIndex.value)
         renderVersion.value++
+        schedulePageThumbnailRefresh(currentPageIndex.value, 400)
     }
 
     function redo() {
@@ -650,6 +798,7 @@ export const useEditorStore = defineStore('editor', () => {
         historyIndex.value += 1
         restoreFromHistory(historyIndex.value)
         renderVersion.value++
+        schedulePageThumbnailRefresh(currentPageIndex.value, 400)
     }
 
     function getDocumentForSave(): DocumentData | null {
@@ -725,6 +874,7 @@ export const useEditorStore = defineStore('editor', () => {
                 annotationsMap[pageIdx] = []
             }
             annotationsMap[pageIdx].push(saved)
+            schedulePageThumbnailRefresh(pageIdx, 400)
             return saved
         } catch (e) {
             console.error('[editorStore] 添加注释失败:', e)
@@ -738,12 +888,13 @@ export const useEditorStore = defineStore('editor', () => {
     ): Promise<boolean> {
         if (!fileId.value) return false
 
+        let affectedPageIndex: number | null = null
         for (const key of Object.keys(annotationsMap)) {
             const pageIdx = Number(key)
             const list = annotationsMap[pageIdx]
             const index = list?.findIndex(a => a.id === annotationId) ?? -1
             if (index !== -1) {
-                // list[index] = 新对象，而不是 Object.assign 修改属性
+                affectedPageIndex = changes.pageIndex ?? pageIdx
                 list[index] = { ...list[index], ...changes }
                 break
             }
@@ -751,6 +902,9 @@ export const useEditorStore = defineStore('editor', () => {
 
         try {
             await ofdApi.updateAnnotation(fileId.value, annotationId, changes)
+            if (affectedPageIndex !== null) {
+                schedulePageThumbnailRefresh(affectedPageIndex, 400)
+            }
             return true
         } catch (e) {
             console.error('[editorStore] 更新注释失败:', e)
@@ -760,9 +914,20 @@ export const useEditorStore = defineStore('editor', () => {
 
     async function deleteAnnotation(annotationId: string): Promise<boolean> {
         if (!fileId.value) return false
+
+        let affectedPageIndex: number | null = null
+        for (const key of Object.keys(annotationsMap)) {
+            const pageIdx = Number(key)
+            const list = annotationsMap[pageIdx]
+            const idx = list?.findIndex(a => a.id === annotationId) ?? -1
+            if (idx !== -1) {
+                affectedPageIndex = pageIdx
+                break
+            }
+        }
+
         try {
             await ofdApi.deleteAnnotation(fileId.value, annotationId)
-            // ✅ 直接操作 reactive 对象
             for (const key of Object.keys(annotationsMap)) {
                 const pageIdx = Number(key)
                 const list = annotationsMap[pageIdx]
@@ -774,6 +939,9 @@ export const useEditorStore = defineStore('editor', () => {
             }
             if (selectedAnnotationId.value === annotationId) {
                 selectedAnnotationId.value = null
+            }
+            if (affectedPageIndex !== null) {
+                schedulePageThumbnailRefresh(affectedPageIndex, 400)
             }
             return true
         } catch (e) {
@@ -797,7 +965,8 @@ export const useEditorStore = defineStore('editor', () => {
         } catch (e) {
             console.warn('[editorStore] 加载注释失败（可能暂无注释）:', e)
         } finally {
-            void generatePageThumbnails()
+            requestPageThumbnail(currentPageIndex.value)
+            requestPageThumbnail(0)
         }
     }
 
@@ -829,7 +998,7 @@ export const useEditorStore = defineStore('editor', () => {
         currentTool, annotationsMap, selectedAnnotationId,
         annotationColor, annotationOpacity, annotationLineWidth,
         pendingStampImage, hasPendingStamp,
-        pageThumbnails, isGeneratingThumbnails,
+        pageThumbnails, thumbnailLoadingPages, thumbnailLoadedCount, isGeneratingThumbnails,
         // ── 原有计算属性 ──
         currentPage, selectedElement, canUndo, canRedo,
         // ── 注释计算属性 ──
@@ -848,7 +1017,8 @@ export const useEditorStore = defineStore('editor', () => {
         addAnnotation, updateAnnotation, deleteAnnotation,
         loadAllAnnotations, getAnnotationsByPage,
         exportWithAnnotations,
-        setPageThumbnail, registerThumbnailGenerationHook, generatePageThumbnails,
+        setPageThumbnail, registerThumbnailCaptureHook,
+        requestPageThumbnail, isPageThumbnailLoading,
     }
 })
 
