@@ -22,7 +22,7 @@
           }"
           :data-page-index="index"
           draggable="true"
-          @click="store.setCurrentPage(index)"
+          @click="onPageItemClick(index)"
           @dragstart="onDragStart(index, $event)"
           @dragover="onDragOver(index, $event)"
           @dragleave="onDragLeave(index)"
@@ -142,6 +142,12 @@ watch(
     () => store.currentPageIndex,
     () => prefetchAroundCurrent(),
 )
+
+function onPageItemClick(index: number) {
+  store.setCurrentPage(index, {
+    scrollIntoView: store.pageViewMode === 'continuous',
+  })
+}
 
 function onDragStart(index: number, e: DragEvent) {
   dragFromIndex.value = index

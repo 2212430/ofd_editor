@@ -125,6 +125,9 @@ export interface PageData {
 // ========== 文档来源 ==========
 export type DocumentSource = 'ofd' | 'pdf'
 
+/** 编辑区页面视图：单页 / 连续滚动 */
+export type PageViewMode = 'single' | 'continuous'
+
 // ========== 文档数据（保持不变） ==========
 export interface DocumentData {
     fileId?: string

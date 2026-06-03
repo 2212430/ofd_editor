@@ -172,13 +172,37 @@
         <RibbonGroup label="页面适应">
           <RibbonButton label="适应宽度" :icon="Expand" :disabled="!store.document" @click="handleFitWidth" />
           <RibbonButton label="适应页面" :icon="Crop" :disabled="!store.document" @click="handleFitPage" />
-          <RibbonButton label="单页" :icon="Document" active />
-          <RibbonButton label="连续页" :icon="Reading" disabled tooltip="即将推出" @click="comingSoon" />
+          <RibbonButton
+              label="单页"
+              :icon="Document"
+              :disabled="!store.document"
+              :active="store.pageViewMode === 'single'"
+              @click="store.setPageViewMode('single')"
+          />
+          <RibbonButton
+              label="连续页"
+              :icon="Reading"
+              :disabled="!store.document"
+              :active="store.pageViewMode === 'continuous'"
+              @click="store.setPageViewMode('continuous')"
+          />
         </RibbonGroup>
         <RibbonSep />
         <RibbonGroup label="旋转">
-          <RibbonButton label="顺时针" :icon="RefreshRight" disabled tooltip="即将推出" @click="comingSoon" />
-          <RibbonButton label="逆时针" :icon="RefreshLeft" disabled tooltip="即将推出" @click="comingSoon" />
+          <RibbonButton
+              label="顺时针"
+              :icon="RefreshRight"
+              :disabled="!store.document"
+              tooltip="视图顺时针旋转 90°"
+              @click="store.rotateViewClockwise()"
+          />
+          <RibbonButton
+              label="逆时针"
+              :icon="RefreshLeft"
+              :disabled="!store.document"
+              tooltip="视图逆时针旋转 90°"
+              @click="store.rotateViewCounterClockwise()"
+          />
         </RibbonGroup>
       </template>
 

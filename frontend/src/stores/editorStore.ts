@@ -2,15 +2,19 @@ import { defineStore, acceptHMRUpdate } from 'pinia'
 import { ref, computed, reactive, nextTick } from 'vue'
 import type {
     DocumentData, ElementData, PageData,
-    AnnotationData, AnnotationType, ToolType, DocumentSource
+    AnnotationData, AnnotationType, ToolType, DocumentSource, PageViewMode
 } from '@/types'
 import { ofdApi } from '@/api/ofdApi'
+import { effectivePageSizeMm, normalizeViewRotation } from '@/utils/viewRotation'
 
 export const useEditorStore = defineStore('editor', () => {
 
     // ==================== 原有状态 ====================
     const document = ref<DocumentData | null>(null)
     const currentPageIndex = ref(0)
+    const pageViewMode = ref<PageViewMode>('single')
+    /** 视图旋转角度（仅显示，0/90/180/270，不写回 OFD） */
+    const viewRotation = ref(0)
     const selectedElementId = ref<string | null>(null)
     const scale = ref(1.0)
     const isLoading = ref(false)
@@ -266,6 +270,7 @@ export const useEditorStore = defineStore('editor', () => {
         selectedAnnotationId.value = null
         pendingStampImage.value = null
         clearPageThumbnails()
+        viewRotation.value = 0
         saveToHistory()
         void nextTick(() => { fitToWidth() })
     }
@@ -438,11 +443,28 @@ export const useEditorStore = defineStore('editor', () => {
         }
     }
 
-    function setCurrentPage(index: number) {
-        if (index >= 0 && index < (document.value?.pageCount ?? 0)) {
-            currentPageIndex.value = index
+    let scrollToPageInViewHook: ((pageIndex: number) => void) | null = null
+
+    function registerScrollToPageInViewHook(hook: (pageIndex: number) => void) {
+        scrollToPageInViewHook = hook
+    }
+
+    function setPageViewMode(mode: PageViewMode) {
+        pageViewMode.value = mode
+    }
+
+    function setCurrentPage(
+        index: number,
+        opts?: { preserveSelection?: boolean; scrollIntoView?: boolean },
+    ) {
+        if (index < 0 || index >= (document.value?.pageCount ?? 0)) return
+        currentPageIndex.value = index
+        if (!opts?.preserveSelection) {
             selectedElementId.value = null
             selectedAnnotationId.value = null
+        }
+        if (opts?.scrollIntoView) {
+            scrollToPageInViewHook?.(index)
         }
     }
 
@@ -453,6 +475,18 @@ export const useEditorStore = defineStore('editor', () => {
 
     function setScale(val: number) {
         scale.value = Math.max(0.25, Math.min(3, val))
+    }
+
+    function rotateViewClockwise() {
+        viewRotation.value = normalizeViewRotation(viewRotation.value + 90)
+    }
+
+    function rotateViewCounterClockwise() {
+        viewRotation.value = normalizeViewRotation(viewRotation.value - 90)
+    }
+
+    function resetViewRotation() {
+        viewRotation.value = 0
     }
 
     /** 与 App.vue `.editor-area` 的四边 padding 之和（各 24px，取宽/高方向合计 48） */
@@ -478,7 +512,8 @@ export const useEditorStore = defineStore('editor', () => {
         const ctx = getFitViewport()
         if (!ctx) return false
 
-        const baseWidthPx = ctx.page.width * MM_TO_PX
+        const eff = effectivePageSizeMm(ctx.page.width, ctx.page.height, viewRotation.value)
+        const baseWidthPx = eff.widthMm * MM_TO_PX
         if (baseWidthPx <= 0) return false
 
         const availableW = ctx.area.clientWidth - EDITOR_AREA_PADDING - 2
@@ -496,8 +531,9 @@ export const useEditorStore = defineStore('editor', () => {
         const ctx = getFitViewport()
         if (!ctx) return false
 
-        const baseWidthPx = ctx.page.width * MM_TO_PX
-        const baseHeightPx = ctx.page.height * MM_TO_PX
+        const eff = effectivePageSizeMm(ctx.page.width, ctx.page.height, viewRotation.value)
+        const baseWidthPx = eff.widthMm * MM_TO_PX
+        const baseHeightPx = eff.heightMm * MM_TO_PX
         if (baseWidthPx <= 0 || baseHeightPx <= 0) return false
 
         const availableW = ctx.area.clientWidth - EDITOR_AREA_PADDING - 2
@@ -990,7 +1026,7 @@ export const useEditorStore = defineStore('editor', () => {
 
     return {
         // ── 原有状态 ──
-        document, currentPageIndex, selectedElementId,
+        document, currentPageIndex, pageViewMode, viewRotation, selectedElementId,
         scale, isLoading, loadingText, currentFile, documentSource,
         history, historyIndex, fileId, renderVersion,
         printDialogVisible,
@@ -1005,8 +1041,11 @@ export const useEditorStore = defineStore('editor', () => {
         currentPageAnnotations, selectedAnnotation,
         isHandTool, isSelectTool, isAnnotationTool,
         // ── 原有方法 ──
-        setDocument, setCurrentFile, setCurrentPage,
-        selectElement, setScale, fitToWidth, fitToPage, registerEditorAreaResolver, setLoading,
+        setDocument, setCurrentFile, setCurrentPage, setPageViewMode,
+        registerScrollToPageInViewHook,
+        selectElement, setScale, fitToWidth, fitToPage,
+        rotateViewClockwise, rotateViewCounterClockwise, resetViewRotation,
+        registerEditorAreaResolver, setLoading,
         updateElement, resetElement, importImageToPage,
         insertPage, deletePage, movePage, copyPage, reorderPages,
         saveToHistory, undo, redo, getDocumentForSave, markNewElementsPersisted,

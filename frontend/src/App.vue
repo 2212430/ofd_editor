@@ -17,13 +17,23 @@
         </div>
 
         <!-- 编辑器 -->
-        <div v-if="store.currentPage" class="canvas-container">
-          <CanvasEditor
-              ref="canvasRef"
-              :page="store.currentPage"
-              :page-index="store.currentPageIndex"
+        <template v-if="store.document">
+          <ContinuousPageView
+              v-if="store.pageViewMode === 'continuous'"
+              ref="continuousViewRef"
           />
-        </div>
+          <div
+              v-else-if="store.currentPage"
+              class="canvas-container"
+              :style="singleCanvasFrameStyle"
+          >
+            <CanvasEditor
+                ref="singleCanvasRef"
+                :page="store.currentPage"
+                :page-index="store.currentPageIndex"
+            />
+          </div>
+        </template>
 
         <!-- 欢迎页 -->
         <div v-else class="welcome">
@@ -63,6 +73,10 @@
           <span>第 {{ store.currentPageIndex + 1 }} / {{ store.document.pageCount }} 页</span>
           <span class="status-sep">|</span>
           <span>缩放 {{ Math.round(store.scale * 100) }}%</span>
+          <template v-if="store.viewRotation !== 0">
+            <span class="status-sep">|</span>
+            <span>视图旋转 {{ normalizeViewRotation(store.viewRotation) }}°</span>
+          </template>
         </template>
         <span v-else>就绪</span>
       </div>
@@ -104,23 +118,48 @@ import { ofdApi } from '@/api/ofdApi'
 import Toolbar from '@/components/Toolbar.vue'
 import PagePanel from '@/components/PagePanel.vue'
 import CanvasEditor from '@/components/CanvasEditor.vue'
+import ContinuousPageView from '@/components/ContinuousPageView.vue'
 import PropertyPanel from '@/components/PropertyPanel.vue'
 import PrintDialog from '@/components/PrintDialog.vue'
 import {
   buildPrintWindow, resolvePageIndices, qualityToPixelRatio,
   type PrintOptions, type CapturedPage,
 } from '@/utils/print'
+import { normalizeViewRotation, viewStagePixelSize } from '@/utils/viewRotation'
 
 const store = useEditorStore()
 const uploadRef = ref<HTMLInputElement>()
 const pdfRef = ref<HTMLInputElement>()
-const canvasRef = ref<InstanceType<typeof CanvasEditor> | null>(null)
+const singleCanvasRef = ref<InstanceType<typeof CanvasEditor> | null>(null)
+const continuousViewRef = ref<InstanceType<typeof ContinuousPageView> | null>(null)
+
+function getActiveCanvas() {
+  if (store.pageViewMode === 'continuous') {
+    return continuousViewRef.value?.getCanvasForPage(store.currentPageIndex) ?? null
+  }
+  return singleCanvasRef.value
+}
 const thumbCanvasRef = ref<InstanceType<typeof CanvasEditor> | null>(null)
 const editorAreaRef = ref<HTMLElement>()
 const thumbCapturePageIndex = ref(0)
 const thumbCapturePage = computed(() =>
     store.document?.pages[thumbCapturePageIndex.value] ?? null,
 )
+
+const singleCanvasFrameStyle = computed(() => {
+  const page = store.currentPage
+  if (!page) return {}
+  const { stageWidth, stageHeight } = viewStagePixelSize(
+      page.width,
+      page.height,
+      store.scale,
+      store.viewRotation,
+  )
+  return {
+    width: `${stageWidth}px`,
+    height: `${stageHeight}px`,
+  }
+})
 
 /** 左侧缩略图：按需截取单页（低分辨率） */
 const THUMBNAIL_PIXEL_RATIO = 0.22
@@ -206,7 +245,7 @@ async function handlePrint(opts: PrintOptions) {
       store.setLoading(true, `正在渲染第 ${i + 1} / ${indices.length} 页…`)
       store.setCurrentPage(idx)
       await nextTick()
-      const cap = await canvasRef.value?.captureForPrint(pixelRatio, opts.includeAnnotations)
+      const cap = await getActiveCanvas()?.captureForPrint(pixelRatio, opts.includeAnnotations)
       if (cap?.dataUrl) {
         captured.push({ index: idx, ...cap })
       }

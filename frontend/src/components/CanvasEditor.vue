@@ -244,6 +244,7 @@ import { computed, nextTick, onUnmounted, reactive, ref, watch, withDefaults } f
 import { ElMessage } from 'element-plus'
 import { useEditorStore } from '@/stores/editorStore'
 import type { PageData, ElementData, AnnotationData } from '@/types'
+import { konvaStageRotationConfig, normalizeViewRotation } from '@/utils/viewRotation'
 
 // ─────────────────────────────────────────────
 // Props / Store
@@ -341,11 +342,35 @@ const RESIZABLE_TYPES = ['RECTANGLE', 'CIRCLE', 'TEXTBOX', 'STICKYNOTE', 'STAMP'
 const canvasWidth  = computed(() => props.page.width  * MM_TO_PX * renderScale.value)
 const canvasHeight = computed(() => props.page.height * MM_TO_PX * renderScale.value)
 
-const stageConfig = computed(() => ({
-  width:  canvasWidth.value,
-  height: canvasHeight.value,
-  listening: !props.offscreen,
-}))
+const stageRotation = computed(() =>
+    konvaStageRotationConfig(
+        props.page.width,
+        props.page.height,
+        renderScale.value,
+        props.offscreen ? 0 : store.viewRotation,
+    ),
+)
+
+const stageConfig = computed(() => {
+  const rot = stageRotation.value
+  return {
+    width:     rot.stageWidth,
+    height:    rot.stageHeight,
+    rotation:  rot.rotation,
+    offsetX:   rot.offsetX,
+    offsetY:   rot.offsetY,
+    x:         rot.x,
+    y:         rot.y,
+    listening: !props.offscreen,
+  }
+})
+
+watch(
+    () => store.viewRotation,
+    () => {
+      nextTick(() => stageRef.value?.getNode?.()?.batchDraw?.())
+    },
+)
 
 const bgConfig = computed(() => ({
   x: 0, y: 0,
@@ -420,10 +445,15 @@ watch(
 // 注释数据
 // ─────────────────────────────────────────────
 const pageAnnotations = computed<AnnotationData[]>(() =>
-    props.offscreen
-        ? (store.annotationsMap[props.pageIndex] ?? [])
-        : store.currentPageAnnotations,
+    store.annotationsMap[props.pageIndex] ?? [],
 )
+
+function ensureActivePageForInteraction() {
+  if (props.offscreen) return
+  if (store.currentPageIndex !== props.pageIndex) {
+    store.setCurrentPage(props.pageIndex, { preserveSelection: true })
+  }
+}
 const annotationConfigs = computed(() =>
     pageAnnotations.value.map(ann => ({
       ann,
@@ -678,7 +708,12 @@ function getStagePos(): { x: number; y: number } | null {
   if (!stage) return null
   const pos = stage.getPointerPosition()
   if (!pos) return null
-  return { x: px2mm(pos.x), y: px2mm(pos.y) }
+  const rot = props.offscreen ? 0 : normalizeViewRotation(store.viewRotation)
+  if (rot === 0) {
+    return { x: px2mm(pos.x), y: px2mm(pos.y) }
+  }
+  const local = stage.getAbsoluteTransform().copy().invert().point(pos)
+  return { x: px2mm(local.x), y: px2mm(local.y) }
 }
 
 // ─────────────────────────────────────────────
@@ -720,6 +755,7 @@ onUnmounted(() => {
 // ─────────────────────────────────────────────
 function handleMouseDown(e: any) {
   if (props.offscreen) return
+  if (store.isAnnotationTool) ensureActivePageForInteraction()
   if (store.isHandTool) {
     if (e.evt?.button !== 0) return
     const sc = getScrollContainer()
@@ -870,6 +906,7 @@ function loadImageDimensions(src: string): Promise<{ width: number; height: numb
 function handleElementClick(e: any, elementId: string) {
   if (suppressClick.value) return
   if (!store.isSelectTool) return
+  ensureActivePageForInteraction()
   const el = props.page.elements.find(item => item.id === elementId)
   if (el?.type === 'SEAL') return
   e.cancelBubble = true
@@ -879,6 +916,7 @@ function handleElementClick(e: any, elementId: string) {
 function handleAnnotationClick(e: any, id: string) {
   e.cancelBubble = true
   if (suppressClick.value) return
+  ensureActivePageForInteraction()
   if (store.currentTool === 'SELECT') store.selectAnnotation(id)
 }
 
