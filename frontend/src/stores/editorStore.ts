@@ -6,6 +6,11 @@ import type {
 } from '@/types'
 import { ofdApi } from '@/api/ofdApi'
 import { effectivePageSizeMm, normalizeViewRotation } from '@/utils/viewRotation'
+import {
+    getElementImageSrc,
+    computeElementBoundsAfterCrop,
+    type CropRect,
+} from '@/utils/imageCrop'
 
 export const useEditorStore = defineStore('editor', () => {
 
@@ -25,6 +30,8 @@ export const useEditorStore = defineStore('editor', () => {
 
     // 打印对话框可见性（跨组件协调：Toolbar 打开、App 编排打印）
     const printDialogVisible = ref(false)
+    /** 图片裁剪对话框（Toolbar / 属性面板共用） */
+    const imageCropDialogVisible = ref(false)
 
     const history = ref<DocumentData[]>([])
     const historyIndex = ref(-1)
@@ -256,6 +263,7 @@ export const useEditorStore = defineStore('editor', () => {
             imageData: dataUrl,
             isNew: true,
             isDirty: true,
+            imageContentDirty: true,
             originalX: x,
             originalY: y,
             originalWidth: wMm,
@@ -601,6 +609,63 @@ export const useEditorStore = defineStore('editor', () => {
         loadingText.value = text
     }
 
+    /**
+     * 对 IMAGE 元素应用像素级裁剪，并同步缩小外框尺寸（mm）。
+     */
+    async function applyImageCrop(
+        pageIndex: number,
+        elementId: string,
+        crop: CropRect,
+        croppedDataUrl: string,
+        sourceNatural: { width: number; height: number },
+    ): Promise<boolean> {
+        if (!document.value) return false
+        const page = document.value.pages[pageIndex]
+        const element = page?.elements.find((e) => e.id === elementId)
+        if (!element || element.type !== 'IMAGE') return false
+
+        const bounds = computeElementBoundsAfterCrop(
+            element.x ?? 0,
+            element.y ?? 0,
+            element.width ?? 0,
+            element.height ?? 0,
+            sourceNatural.width,
+            sourceNatural.height,
+            crop,
+        )
+
+        // 预加载裁剪图，避免画布仍绑定旧 HTMLImageElement
+        await loadImageDimensions(croppedDataUrl)
+
+        updateElement(pageIndex, elementId, {
+            imageBase64: croppedDataUrl,
+            imageData: croppedDataUrl,
+            imageUrl: undefined,
+            x: bounds.x,
+            y: bounds.y,
+            width: bounds.width,
+            height: bounds.height,
+            scaleX: 1,
+            scaleY: 1,
+            imageContentDirty: true,
+            imageRevision: (element.imageRevision ?? 0) + 1,
+        })
+        renderVersion.value++
+        return true
+    }
+
+    function canCropSelectedImage(): boolean {
+        const el = selectedElement.value
+        if (!el || el.type !== 'IMAGE') return false
+        return !!getElementImageSrc(el)
+    }
+
+    function openImageCropDialog(): boolean {
+        if (!canCropSelectedImage()) return false
+        imageCropDialogVisible.value = true
+        return true
+    }
+
     function updateElement(
         pageIndex: number,
         elementId: string,
@@ -889,22 +954,33 @@ export const useEditorStore = defineStore('editor', () => {
 
     function getDocumentForSave(): DocumentData | null {
         if (!document.value) return null
-        return { ...document.value, fileId: fileId.value ?? undefined }
+        // 深拷贝页面/元素，确保 imageBase64、imageContentDirty 等字段完整进入保存 JSON
+        const pages = document.value.pages.map((page) => ({
+            ...page,
+            elements: page.elements.map((el) => ({ ...el })),
+        }))
+        return {
+            ...document.value,
+            pages,
+            fileId: fileId.value ?? undefined,
+        }
     }
 
-    /** 保存成功后调用：避免再次保存时重复插入 isNew 图片 */
+    /** 保存成功后调用：同步 original*、清除 dirty / isNew / imageContentDirty */
     function markNewElementsPersisted() {
         if (!document.value) return
         for (const page of document.value.pages) {
             for (const el of page.elements) {
-                if (!el.isNew) continue
-                el.isNew = false
-                el.originalX = el.x
-                el.originalY = el.y
-                el.originalWidth = el.width
-                el.originalHeight = el.height
-                el.originalRotation = el.rotation ?? 0
-                el.isDirty = false
+                if (el.isNew) el.isNew = false
+                el.imageContentDirty = false
+                if (el.isDirty) {
+                    el.originalX = el.x
+                    el.originalY = el.y
+                    el.originalWidth = el.width
+                    el.originalHeight = el.height
+                    el.originalRotation = el.rotation ?? 0
+                    el.isDirty = false
+                }
             }
         }
         saveToHistory()
@@ -1105,6 +1181,7 @@ export const useEditorStore = defineStore('editor', () => {
         scale, isLoading, loadingText, currentFile, documentSource,
         history, historyIndex, fileId, renderVersion,
         printDialogVisible,
+        imageCropDialogVisible,
         // ── 注释状态 ──
         currentTool, annotationsMap, selectedAnnotationId,
         rightPanelTab, annotationListScope, filteredAnnotationList, annotationCount,
@@ -1123,7 +1200,8 @@ export const useEditorStore = defineStore('editor', () => {
         selectElement, setScale, fitToWidth, fitToPage,
         rotateViewClockwise, rotateViewCounterClockwise, resetViewRotation,
         registerEditorAreaResolver, setLoading,
-        updateElement, resetElement, importImageToPage,
+        updateElement, resetElement, importImageToPage, applyImageCrop,
+        canCropSelectedImage, openImageCropDialog,
         insertPage, deletePage, movePage, copyPage, reorderPages,
         saveToHistory, undo, redo, getDocumentForSave, markNewElementsPersisted,
         // ── 注释方法 ──

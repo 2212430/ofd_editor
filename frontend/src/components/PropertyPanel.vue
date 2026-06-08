@@ -233,6 +233,21 @@
           </div>
         </template>
 
+        <template v-if="store.selectedElement.type === 'IMAGE'">
+          <el-divider style="margin: 8px 0" />
+          <el-button
+              type="primary"
+              plain
+              size="small"
+              style="width:100%"
+              :icon="Crop"
+              :disabled="!store.canCropSelectedImage()"
+              @click="handleOpenImageCrop"
+          >
+            裁剪图片
+          </el-button>
+        </template>
+
         <el-divider style="margin: 8px 0" />
 
         <el-button
@@ -250,7 +265,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { Pointer, RefreshLeft, Delete } from '@element-plus/icons-vue'
+import { Pointer, RefreshLeft, Delete, Crop } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useEditorStore } from '@/stores/editorStore'
 import type { ElementData, AnnotationData } from '@/types'
@@ -346,5 +361,11 @@ function handleReset() {
   if (!store.selectedElementId) return
   store.resetElement(store.currentPageIndex, store.selectedElementId)
   ElMessage.success('已重置到原始状态')
+}
+
+function handleOpenImageCrop() {
+  if (!store.openImageCropDialog()) {
+    ElMessage.warning('当前图片无法裁剪，请确认已加载图片数据')
+  }
 }
 </script>

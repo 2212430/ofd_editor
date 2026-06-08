@@ -390,6 +390,8 @@ public class OfdRebuildService {
                         ? dirtyOnThisPage
                         : dirtyOnThisPage.stream()
                                 .filter(el -> !Boolean.TRUE.equals(el.getIsNew()))
+                                // 模板层仅回写文本；IMAGE/PATH 只在正文页 Content.xml 处理，避免误匹配
+                                .filter(el -> "TEXT".equals(el.getType()))
                                 .toList();
                 if (batch.isEmpty()) continue;
                 byte[] patchedXml = patchOnePageXml(xmlBytes, batch, zipEntries, docPrefix, isMainPage);
@@ -471,7 +473,7 @@ public class OfdRebuildService {
                 if (allowInsertNew && Boolean.TRUE.equals(el.getIsNew()) && "IMAGE".equals(el.getType())) {
                     insertNewImageElement(doc, root, el, zipEntries, docPrefix);
                 } else {
-                    patchElement(doc, root, el);
+                    patchElement(doc, root, el, zipEntries, docPrefix);
                 }
             } catch (Exception e) {
                 log.warn("修改元素失败 id={}: {}", el.getId(), e.getMessage());
@@ -485,13 +487,14 @@ public class OfdRebuildService {
      * 在页面XML中找到对应节点并修改
      * 匹配策略：优先用 originalX/Y/Width/Height 坐标匹配，精度 0.5mm
      */
-    private void patchElement(Document doc, Element root, ElementDTO el) {
+    private void patchElement(Document doc, Element root, ElementDTO el,
+                              Map<String, byte[]> zipEntries, String docPrefix) {
         String type = el.getType();
         if (type == null) return;
 
         switch (type) {
             case "TEXT" -> patchTextElement(doc, root, el);
-            case "IMAGE" -> patchImageElement(doc, root, el);
+            case "IMAGE" -> patchImageElement(doc, root, el, zipEntries, docPrefix);
             case "PATH" -> patchPathElement(doc, root, el);
         }
     }
@@ -573,20 +576,235 @@ public class OfdRebuildService {
         return null;
     }
 
-    private void patchImageElement(Document doc, Element root, ElementDTO el) {
+    private void patchImageElement(Document doc, Element root, ElementDTO el,
+                                     Map<String, byte[]> zipEntries, String docPrefix) {
         if (Boolean.TRUE.equals(el.getIsNew())) {
             return;
         }
         NodeList nodes = getElementsByLocalName(root, "ImageObject");
-        Element matched = findBestMatchByBoundary(nodes, el);
+        Element matched = null;
+        if (isNotBlank(el.getXmlObjId())) {
+            matched = findByXmlObjId(nodes, el.getXmlObjId());
+        }
+        if (matched == null) {
+            matched = findBestMatchByBoundary(nodes, el);
+        }
         if (matched == null) {
             log.warn("IMAGE元素未找到匹配节点: id={}", el.getId());
             return;
         }
+
+        byte[] imageBytes = decodeImageBase64(firstNonBlank(el.getImageBase64(), el.getImageData()));
+        boolean contentChanged = Boolean.TRUE.equals(el.getImageContentDirty());
+        if (!contentChanged && imageBytes != null && imageBytes.length > 0 && Boolean.TRUE.equals(el.getIsDirty())) {
+            // 兜底：前端未传 imageContentDirty 时，边界变化且携带 base64 仍视为像素级编辑（如裁剪）
+            contentChanged = isPositionChanged(el);
+        }
+
+        if (contentChanged) {
+            if (imageBytes == null || imageBytes.length == 0) {
+                log.warn("IMAGE 裁剪/替换标记为 true，但未收到 imageBase64: id={}", el.getId());
+            } else if (zipEntries != null && isNotBlank(docPrefix)) {
+                try {
+                    writeCroppedImageResource(zipEntries, docPrefix, matched, el, imageBytes);
+                } catch (Exception e) {
+                    log.warn("写入裁剪图片资源失败 id={}: {}", el.getId(), e.getMessage(), e);
+                }
+            }
+        }
+
         if (isPositionChanged(el)) {
             updateBoundaryAttr(matched, el);
         }
-        log.debug("IMAGE节点位置已修改");
+
+        if (contentChanged || isPositionChanged(el)) {
+            resetImageObjectDisplayTransform(matched, el);
+        }
+        log.debug("IMAGE节点已修改: contentChanged={}", contentChanged);
+    }
+
+    /**
+     * 裁剪/替换：写入全新 MultiMedia 资源并让 ImageObject 指向它（OFD 会将整幅资源缩放到 Boundary，
+     * 必须替换资源像素，不能只改外框）。
+     */
+    private void writeCroppedImageResource(Map<String, byte[]> zipEntries,
+                                           String docPrefix,
+                                           Element matched,
+                                           ElementDTO el,
+                                           byte[] imageBytes) throws Exception {
+        String ext = guessImageExtension(el.getImageBase64(), el.getImageData(), imageBytes);
+        int resourceId = allocateNextResourceId(zipEntries, docPrefix);
+        String resFileName = "image_" + resourceId + "." + ext.toLowerCase(Locale.ROOT);
+        String resZipPath = docPrefix.replace('\\', '/') + "/Res/" + resFileName;
+        zipEntries.put(resZipPath, imageBytes);
+        registerImageResource(zipEntries, docPrefix, resourceId, resFileName, ext);
+        setAttrIgnoreNs(matched, "ResourceID", String.valueOf(resourceId));
+        el.setResourceId(String.valueOf(resourceId));
+        log.info("裁剪图片已写入新资源: elementId={}, resourceId={}, path={}, bytes={}",
+                el.getId(), resourceId, resZipPath, imageBytes.length);
+    }
+
+    /** 去掉缩放型 CTM/Clip，避免读者把整幅旧图缩进新 Boundary */
+    private void resetImageObjectDisplayTransform(Element imgObj, ElementDTO el) {
+        removeAttrIfExists(imgObj, "CTM");
+        removeAttrIfExists(imgObj, "ctm");
+        removeChildElementsByLocalName(imgObj, "Clips");
+        removeChildElementsByLocalName(imgObj, "Clip");
+        if (el.getRotation() != null && Math.abs(el.getRotation()) > 0.001) {
+            setAttrIgnoreNs(imgObj, "CTM",
+                    buildRotationCtm(el.getRotation(), nvl(el.getX()), nvl(el.getY())));
+        } else {
+            removeAttrIfExists(imgObj, "Rotate");
+            removeAttrIfExists(imgObj, "rotate");
+        }
+    }
+
+    /**
+     * 裁剪/替换图片时，按 ResourceID 写回 Doc_x/Res/ 下对应二进制文件（DocumentRes + PublicRes）。
+     */
+    private void replaceResourceImageBytes(Map<String, byte[]> zipEntries,
+                                           String docPrefix,
+                                           String resourceId,
+                                           byte[] imageBytes,
+                                           String ext) throws Exception {
+        List<String> resXmlPaths = findAllResXmlPaths(zipEntries, docPrefix);
+        for (String resXmlPath : resXmlPaths) {
+            if (replaceResourceInResXml(zipEntries, resXmlPath, docPrefix, resourceId, imageBytes, ext)) {
+                return;
+            }
+        }
+        log.warn("PublicRes/DocumentRes 中均未找到 resourceId={}", resourceId);
+    }
+
+    private List<String> findAllResXmlPaths(Map<String, byte[]> zipEntries, String docPrefix) {
+        List<String> result = new ArrayList<>();
+        String prefix = docPrefix.replace('\\', '/');
+        for (String suffix : List.of("/DocumentRes.xml", "/PublicRes.xml")) {
+            String key = findZipEntryKey(zipEntries, prefix + suffix);
+            if (key != null && !result.contains(key)) {
+                result.add(key);
+            }
+        }
+        if (result.isEmpty()) {
+            String docRes = findDocumentResXmlPath(zipEntries, docPrefix);
+            if (docRes != null) result.add(docRes);
+        }
+        return result;
+    }
+
+    private boolean replaceResourceInResXml(Map<String, byte[]> zipEntries,
+                                            String resXmlPath,
+                                            String docPrefix,
+                                            String resourceId,
+                                            byte[] imageBytes,
+                                            String ext) throws Exception {
+        Document resDoc = parseXml(zipEntries.get(resXmlPath));
+        Element resRoot = resDoc.getDocumentElement();
+        NodeList mediaNodes = getElementsByLocalName(resRoot, "MultiMedia");
+        for (int i = 0; i < mediaNodes.getLength(); i++) {
+            if (!(mediaNodes.item(i) instanceof Element mm)) continue;
+            String id = firstNonBlank(
+                    getAttrIgnoreNs(mm, "ID"),
+                    getAttrIgnoreNs(mm, "Id"),
+                    getAttrIgnoreNs(mm, "id"));
+            if (!isNotBlank(id) || !resourceId.equals(id.trim())) continue;
+
+            String mediaFile = getFirstTextByLocalName(mm, "MediaFile");
+            if (!isNotBlank(mediaFile)) continue;
+
+            String resXmlDir = parentDir(resXmlPath.replace('\\', '/'));
+            String oldMediaRel = normalizeResourcePath(mediaFile.trim());
+            String oldMediaAbs = resolveZipPath(resXmlDir, oldMediaRel);
+            String oldZipKey = findZipEntryKey(zipEntries, oldMediaAbs);
+            if (oldZipKey == null) {
+                log.warn("未找到资源文件: resourceId={}, path={}", resourceId, oldMediaAbs);
+                return false;
+            }
+
+            String lowerExt = ext.toLowerCase(Locale.ROOT);
+            String newFileName = "image_" + resourceId + "." + lowerExt;
+            String newMediaRel = "Res/" + newFileName;
+            String newZipKey = findZipEntryKey(zipEntries, resolveZipPath(docPrefix.replace('\\', '/'), newMediaRel));
+            if (newZipKey == null) {
+                newZipKey = docPrefix.replace('\\', '/') + "/Res/" + newFileName;
+            }
+
+            if (!oldZipKey.equals(newZipKey)) {
+                zipEntries.remove(oldZipKey);
+            }
+            zipEntries.put(newZipKey, imageBytes);
+
+            Element mediaFileEl = findChildElementByLocalName(mm, "MediaFile");
+            if (mediaFileEl == null) {
+                String ns = mm.getNamespaceURI();
+                mediaFileEl = ns != null
+                        ? resDoc.createElementNS(ns, "MediaFile")
+                        : resDoc.createElement("MediaFile");
+                mm.appendChild(mediaFileEl);
+            }
+            mediaFileEl.setTextContent(newMediaRel);
+
+            setAttrIgnoreNs(mm, "Format", ext.toUpperCase(Locale.ROOT));
+            zipEntries.put(resXmlPath, serializeXml(resDoc));
+            log.info("已替换图片资源: resourceId={}, resXml={}, zipKey={}, bytes={}",
+                    resourceId, resXmlPath, newZipKey, imageBytes.length);
+            return true;
+        }
+        return false;
+    }
+
+    private static String parentDir(String path) {
+        if (path == null || path.isBlank()) return "";
+        int slash = path.lastIndexOf('/');
+        return slash <= 0 ? "" : path.substring(0, slash);
+    }
+
+    private static String resolveZipPath(String baseDir, String rel) {
+        String b = baseDir == null ? "" : baseDir.replace('\\', '/').replaceAll("/+$", "");
+        String r = rel == null ? "" : rel.replace('\\', '/').trim();
+        if (r.startsWith("/")) r = r.substring(1);
+        if (b.isBlank()) return r;
+        if (r.isBlank()) return b;
+        try {
+            String combined = b + "/" + r;
+            String n = new java.net.URI(combined).normalize().getPath();
+            return n.startsWith("/") ? n.substring(1) : n;
+        } catch (Exception e) {
+            return b + "/" + r;
+        }
+    }
+
+    private static String normalizeResourcePath(String path) {
+        return path.replace('\\', '/').replaceAll("^\\./", "");
+    }
+
+    private static String filename(String path) {
+        int slash = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+        return slash >= 0 ? path.substring(slash + 1) : path;
+    }
+
+    private String findZipEntryKey(Map<String, byte[]> zipEntries, String preferred) {
+        if (zipEntries.containsKey(preferred)) return preferred;
+        String norm = preferred.replace('\\', '/');
+        for (String key : zipEntries.keySet()) {
+            if (key.replace('\\', '/').equalsIgnoreCase(norm)) return key;
+        }
+        return null;
+    }
+
+    private String findZipEntryEndsWith(Map<String, byte[]> zipEntries, String suffix) {
+        String normSuffix = suffix.replace('\\', '/');
+        for (String key : zipEntries.keySet()) {
+            if (key.replace('\\', '/').endsWith(normSuffix)) return key;
+        }
+        return null;
+    }
+
+    private String getFirstTextByLocalName(Element parent, String localName) {
+        Element child = findChildElementByLocalName(parent, localName);
+        if (child == null) return null;
+        String text = child.getTextContent();
+        return isNotBlank(text) ? text.trim() : null;
     }
 
     private void patchPathElement(Document doc, Element root, ElementDTO el) {

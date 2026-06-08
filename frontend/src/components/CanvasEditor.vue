@@ -59,6 +59,7 @@
           />
           <v-image
               v-else-if="element.type === 'IMAGE' && !!imageMap[element.id]"
+              :key="imageNodeKey(element)"
               :config="getImageConfig(element)"
               @click="handleElementClick($event, element.id)"
               @dragend="(e: any) => handleDragEnd(e, element.id)"
@@ -423,14 +424,31 @@ const imageErrorMap = reactive<Record<string, boolean>>({})
 watch(
     () => props.page.elements
         .filter(el => el.type === 'IMAGE' || el.type === 'SEAL')
-        .map(el => ({ id: el.id, src: getImageSrc(el) })),
+        .map(el => ({
+          id: el.id,
+          src: getImageSrc(el),
+          rev: el.imageRevision ?? 0,
+        })),
     (items) => {
+      const alive = new Set(items.map(i => i.id))
+      for (const id of Object.keys(imageMap)) {
+        if (!alive.has(id)) {
+          delete imageMap[id]
+          delete imageErrorMap[id]
+        }
+      }
       for (const item of items) {
-        if (!item.src || imageMap[item.id]) continue
+        if (!item.src) continue
+        const cached = imageMap[item.id]
+        if (cached && cached.src === item.src) continue
+        delete imageMap[item.id]
         imageErrorMap[item.id] = false
         const img = new window.Image()
         if (!item.src.startsWith('data:')) img.crossOrigin = 'anonymous'
-        img.onload  = () => { imageMap[item.id] = img }
+        img.onload  = () => {
+          imageMap[item.id] = img
+          store.renderVersion++
+        }
         img.onerror = () => {
           imageErrorMap[item.id] = true
           console.warn('[IMG 加载失败]', item.id, item.src.slice(0, 80))
@@ -440,6 +458,12 @@ watch(
     },
     { immediate: true, deep: false }
 )
+
+function imageNodeKey(element: ElementData): string {
+  const src = getImageSrc(element)
+  const rev = element.imageRevision ?? 0
+  return `${element.id}-${rev}-${src.length}`
+}
 
 // ─────────────────────────────────────────────
 // 注释数据

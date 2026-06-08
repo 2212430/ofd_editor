@@ -2988,6 +2988,15 @@ public class OfdParseService {
     }
 
     private String detectMimeByPathOrBytes(String path, byte[] bytes) {
+        if (bytes != null && bytes.length >= 4) {
+            if ((bytes[0] & 0xFF) == 0xFF && (bytes[1] & 0xFF) == 0xD8) return "image/jpeg";
+            if ((bytes[0] & 0xFF) == 0x89 && bytes[1] == 'P') return "image/png";
+            if (bytes[0] == 'G' && bytes[1] == 'I' && bytes[2] == 'F') return "image/gif";
+            if (bytes[0] == 'B' && bytes[1] == 'M') return "image/bmp";
+            if (bytes.length >= 12 && bytes[0] == 'R' && bytes[1] == 'I'
+                    && bytes[8] == 'W' && bytes[9] == 'E') return "image/webp";
+            if (Jbig2Converter.isLikelyJbig2(bytes)) return "image/jbig2";
+        }
         String p = path == null ? "" : path.toLowerCase(Locale.ROOT);
         if (p.endsWith(".jpg") || p.endsWith(".jpeg")) return "image/jpeg";
         if (p.endsWith(".png"))  return "image/png";
@@ -2995,14 +3004,6 @@ public class OfdParseService {
         if (p.endsWith(".bmp"))  return "image/bmp";
         if (p.endsWith(".webp")) return "image/webp";
         if (p.endsWith(".jb2") || p.endsWith(".jbig2")) return "image/jbig2";
-        if (bytes == null || bytes.length < 4) return "image/png";
-        if ((bytes[0] & 0xFF) == 0xFF && (bytes[1] & 0xFF) == 0xD8) return "image/jpeg";
-        if ((bytes[0] & 0xFF) == 0x89 && bytes[1] == 'P') return "image/png";
-        if (bytes[0] == 'G' && bytes[1] == 'I' && bytes[2] == 'F') return "image/gif";
-        if (bytes[0] == 'B' && bytes[1] == 'M') return "image/bmp";
-        if (bytes.length >= 12 && bytes[0] == 'R' && bytes[1] == 'I'
-                && bytes[8] == 'W' && bytes[9] == 'E') return "image/webp";
-        if (Jbig2Converter.isLikelyJbig2(bytes)) return "image/jbig2";
         return "image/png";
     }
 
@@ -3222,12 +3223,12 @@ public class OfdParseService {
             );
         }
         if ("IMAGE".equals(d.getType())) {
-            // PDF 转 OFD 等场景：同一 ImageObject 可能重复出现
-            if (isNotBlank(d.getResourceId())) {
-                return "IMAGE|res|" + d.getResourceId().trim();
-            }
+            // 同一 ResourceID 可对应多个 ImageObject（如发票二维码），优先按 XML 对象 ID 区分
             if (isNotBlank(d.getXmlObjId())) {
                 return "IMAGE|obj|" + d.getXmlObjId().trim();
+            }
+            if (isNotBlank(d.getResourceId())) {
+                return "IMAGE|res|" + d.getResourceId().trim();
             }
             return String.join("|",
                     safeStr(d.getType()),

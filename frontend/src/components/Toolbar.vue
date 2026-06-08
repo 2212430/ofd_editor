@@ -232,7 +232,13 @@
         </RibbonGroup>
         <RibbonSep />
         <RibbonGroup label="高级">
-          <RibbonButton label="图片裁剪" :icon="Crop" disabled tooltip="即将推出" @click="comingSoon" />
+          <RibbonButton
+              label="图片裁剪"
+              :icon="Crop"
+              :disabled="!store.canCropSelectedImage()"
+              tooltip="裁剪当前选中的图片元素"
+              @click="handleOpenImageCrop"
+          />
           <RibbonButton label="路径编辑" :icon="EditPen" disabled tooltip="即将推出" @click="comingSoon" />
         </RibbonGroup>
       </template>
@@ -297,6 +303,7 @@
     <DocumentPropertiesDialog v-model="docPropsVisible" />
     <OfdMergeDialog v-model="mergeDialogVisible" />
     <PdfMergeDialog v-model="pdfMergeDialogVisible" />
+    <ImageCropDialog v-model="store.imageCropDialogVisible" />
   </div>
 </template>
 
@@ -321,6 +328,7 @@ import RibbonButton from '@/components/RibbonButton.vue'
 import DocumentPropertiesDialog from '@/components/DocumentPropertiesDialog.vue'
 import OfdMergeDialog from '@/components/OfdMergeDialog.vue'
 import PdfMergeDialog from '@/components/PdfMergeDialog.vue'
+import ImageCropDialog from '@/components/ImageCropDialog.vue'
 
 const HandIcon = defineComponent({
   name: 'HandIcon',
@@ -378,6 +386,12 @@ function switchTab(tab: typeof tabs[0]) {
 
 function comingSoon() {
   ElMessage.info('该功能即将推出，敬请期待')
+}
+
+function handleOpenImageCrop() {
+  if (!store.openImageCropDialog()) {
+    ElMessage.warning('请先选中一张可编辑的图片元素')
+  }
 }
 
 function handleFitWidth() {

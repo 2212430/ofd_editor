@@ -79,6 +79,8 @@ public class ElementDTO {
     private Boolean isNew;
     // 是否被修改
     private Boolean isDirty;
+    /** 图片像素内容已变更（裁剪/替换），保存时需写回 Res 二进制 */
+    private Boolean imageContentDirty;
 
     // 原始坐标（非破坏性编辑）
     private Double originalX;
