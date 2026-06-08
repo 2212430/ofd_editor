@@ -81,7 +81,7 @@ import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Close, Document, Files, FolderOpened } from '@element-plus/icons-vue'
 import { useEditorStore } from '@/stores/editorStore'
-import { buildMergedPdfFilename, ofdApi, promptDownloadBlob } from '@/api/ofdApi'
+import { buildMergedPdfFilename, ofdApi, downloadBlob } from '@/api/ofdApi'
 
 const MAX_FILES = 2
 
@@ -159,8 +159,7 @@ async function handleMerge() {
   try {
     const pdfBlob = await ofdApi.mergePdf(first, second)
 
-    store.setLoading(true, '合并完成，请下载 PDF 文件…')
-    await promptDownloadBlob(pdfBlob, pdfFilename)
+    downloadBlob(pdfBlob, pdfFilename)
 
     store.setLoading(true, '正在导入编辑器（PDF→OFD）…')
     const pdfFile = new File([pdfBlob], pdfFilename, { type: 'application/pdf' })

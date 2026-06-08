@@ -115,7 +115,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Upload } from '@element-plus/icons-vue'
 import { useEditorStore } from '@/stores/editorStore'
-import { ofdApi, promptDownloadBlob } from '@/api/ofdApi'
+import { ofdApi, downloadBlob } from '@/api/ofdApi'
 import {
   buildCurrentPagePngFilename, dataUrlToBlob, EXPORT_PAGE_PIXEL_RATIO,
 } from '@/utils/exportPageImage'
@@ -225,8 +225,8 @@ async function handleExportCurrentPageImage() {
 
     const blob = await dataUrlToBlob(cap.dataUrl)
     const filename = buildCurrentPagePngFilename(doc.title, pageIdx)
-    const saved = await promptDownloadBlob(blob, filename)
-    if (saved) ElMessage.success(`已导出第 ${pageIdx + 1} 页为 PNG`)
+    downloadBlob(blob, filename)
+    ElMessage.success(`已导出第 ${pageIdx + 1} 页为 PNG`)
   } catch (err: any) {
     console.error('[export] 当前页导出失败', err)
     ElMessage.error(err?.message ?? '导出失败')

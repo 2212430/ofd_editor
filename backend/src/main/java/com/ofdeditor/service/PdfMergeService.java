@@ -11,11 +11,48 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 
 /**
- * 在 PDF 层面合并文档（保留各页原生 PDF 内容，非栅格化）。
+ * 在 PDF 层面合并/拆分文档（保留各页原生 PDF 内容，非栅格化）。
  */
 @Slf4j
 @Service
 public class PdfMergeService {
+
+    public record SplitPair(byte[] part1, byte[] part2) {}
+
+    /**
+     * @param splitAfterPage 第一部分最后一页页码（1-based）
+     */
+    public SplitPair splitPdf(byte[] pdfBytes, int splitAfterPage) throws IOException {
+        if (pdfBytes == null || pdfBytes.length == 0) {
+            throw new IllegalArgumentException("PDF 文件为空");
+        }
+        try (PDDocument src = PDDocument.load(pdfBytes)) {
+            int total = src.getNumberOfPages();
+            com.ofdeditor.util.SplitPayloadUtil.validateSplit(total, splitAfterPage);
+            byte[] part1 = extractPageRange(src, 0, splitAfterPage);
+            byte[] part2 = extractPageRange(src, splitAfterPage, total);
+            log.info("PDF 拆分完成: 共 {} 页, 拆分点={}, 第一部分 {} 页, 第二部分 {} 页",
+                    total, splitAfterPage, splitAfterPage, total - splitAfterPage);
+            return new SplitPair(part1, part2);
+        }
+    }
+
+    public int countPages(byte[] pdfBytes) throws IOException {
+        try (PDDocument doc = PDDocument.load(pdfBytes)) {
+            return doc.getNumberOfPages();
+        }
+    }
+
+    private static byte[] extractPageRange(PDDocument src, int fromInclusive, int toExclusive) throws IOException {
+        try (PDDocument dest = new PDDocument()) {
+            for (int i = fromInclusive; i < toExclusive; i++) {
+                dest.importPage(src.getPage(i));
+            }
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            dest.save(out);
+            return out.toByteArray();
+        }
+    }
 
     /**
      * @param firstPdf  第一个 PDF（页面在前）

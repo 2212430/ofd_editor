@@ -1,6 +1,6 @@
 import axios from 'axios'
-import { ElMessageBox } from 'element-plus'
 import type { DocumentData, AnnotationData } from '@/types'
+import { unpackSplitPayload, type SplitPackedFile } from '@/utils/splitPayload'
 
 // axios实例（常规接口 60s；大文件转换在单次请求里单独加长 timeout）
 const http = axios.create({
@@ -54,24 +54,25 @@ export async function pickOfdSaveTarget(suggestedName: string): Promise<SaveTarg
         }
     }
 
-    try {
-        const { value } = await ElMessageBox.prompt(
-            '请输入文件名。不支持选择文件夹时将保存到浏览器默认下载目录。',
-            '另存为',
-            {
-                inputValue: suggested,
-                confirmButtonText: '保存',
-                cancelButtonText: '取消',
-                inputPattern: /^[^\\/:*?"<>|]+$/,
-                inputErrorMessage: '文件名不能包含 \\ / : * ? " < > |',
-            },
-        )
-        const name = (value ?? '').trim()
-        if (!name) return null
-        return { mode: 'download', filename: ensureOfdFilename(name) }
-    } catch {
-        return null
-    }
+    return { mode: 'download', filename: suggested }
+}
+
+/** 下载 Blob 文件（同步触发，需在用户点击事件回调里调用） */
+export function downloadBlob(blob: Blob, filename: string) {
+    const safeName = sanitizeFilename(filename)
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = safeName
+    a.rel = 'noopener'
+    a.style.display = 'none'
+    document.body.appendChild(a)
+    a.click()
+    // 大文件（10MB+）若立刻 revoke，Chrome/Edge 可能还没写完就中断下载
+    setTimeout(() => {
+        document.body.removeChild(a)
+        URL.revokeObjectURL(url)
+    }, 60_000)
 }
 
 /** 将 Blob 写入 pickOfdSaveTarget 选定的目标 */
@@ -83,12 +84,6 @@ export async function writeBlobToSaveTarget(blob: Blob, target: SaveTarget): Pro
         return
     }
     downloadBlob(blob, target.filename)
-}
-
-function formatFileSize(bytes: number): string {
-    if (bytes < 1024) return `${bytes} B`
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
 /** 后端用 blob 返回错误正文时，把可读信息抛出来 */
@@ -167,6 +162,42 @@ export const ofdApi = {
             timeout: 300_000,
         })
         return res.data
+    },
+
+    /** 拆分当前缓存 OFD，返回两份文件（XXX第一部分.ofd / XXX第二部分.ofd） */
+    splitOfd: async (payload: {
+        fileId: string
+        splitAfterPage: number
+        title?: string
+    }): Promise<SplitPackedFile[]> => {
+        const res = await http.post('/split-ofd', payload, {
+            responseType: 'arraybuffer',
+            timeout: 300_000,
+            headers: { 'Content-Type': 'application/json' },
+        })
+        return unpackSplitPayload(res.data)
+    },
+
+    /** 读取 PDF 页数 */
+    pdfPageCount: async (file: File): Promise<number> => {
+        const form = new FormData()
+        form.append('file', file)
+        const res = await http.post<{ pageCount: number }>('/pdf-page-count', form, {
+            timeout: 120_000,
+        })
+        return res.data.pageCount
+    },
+
+    /** 拆分原生 PDF，返回两份文件 */
+    splitPdf: async (file: File, splitAfterPage: number): Promise<SplitPackedFile[]> => {
+        const form = new FormData()
+        form.append('file', file)
+        form.append('splitAfterPage', String(splitAfterPage))
+        const res = await http.post('/split-pdf', form, {
+            responseType: 'arraybuffer',
+            timeout: 600_000,
+        })
+        return unpackSplitPayload(res.data)
     },
 
     /** OFD转PDF（42 页级文档转换可能超过 60s，单独放宽超时） */
@@ -326,46 +357,8 @@ export const ofdApi = {
     },
 }
 
-/** 下载 Blob 文件（同步触发，需在用户点击事件回调里调用） */
-export function downloadBlob(blob: Blob, filename: string) {
-    const safeName = sanitizeFilename(filename)
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = safeName
-    a.rel = 'noopener'
-    a.style.display = 'none'
-    document.body.appendChild(a)
-    a.click()
-    // 大文件（10MB+）若立刻 revoke，Chrome/Edge 可能还没写完就中断下载
-    setTimeout(() => {
-        document.body.removeChild(a)
-        URL.revokeObjectURL(url)
-    }, 60_000)
-}
-
-/**
- * 异步任务完成后弹出「下载」按钮，由用户再点一次保存。
- * 长时间 await 之后直接 a.click() 会被浏览器当成非用户手势而静默拦截。
- */
+/** 直接触发浏览器下载（不再弹出确认框） */
 export async function promptDownloadBlob(blob: Blob, filename: string): Promise<boolean> {
-    const safeName = sanitizeFilename(filename)
-    try {
-        await ElMessageBox.confirm(
-            `文件已生成（${formatFileSize(blob.size)}）。\n` +
-            `文件名：${safeName}\n\n` +
-            `由于转换耗时较长，请点击「下载」保存到浏览器默认下载目录（通常是「下载」文件夹）。`,
-            '导出完成',
-            {
-                confirmButtonText: '下载',
-                cancelButtonText: '稍后',
-                type: 'success',
-                closeOnClickModal: false,
-            },
-        )
-        downloadBlob(blob, safeName)
-        return true
-    } catch {
-        return false
-    }
+    downloadBlob(blob, filename)
+    return true
 }

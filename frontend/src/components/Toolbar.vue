@@ -260,6 +260,19 @@
               tooltip="合并两个 PDF 并先下载原生 PDF，再导入编辑器"
               @click="pdfMergeDialogVisible = true"
           />
+          <RibbonButton
+              label="OFD拆分"
+              :icon="Scissor"
+              :disabled="!canSplitOfd"
+              tooltip="将当前打开的 OFD 按页码拆成两份并分别保存"
+              @click="ofdSplitDialogVisible = true"
+          />
+          <RibbonButton
+              label="PDF拆分"
+              :icon="Scissor"
+              tooltip="选择原生 PDF 文件，按页码拆成两份并分别保存"
+              @click="pdfSplitDialogVisible = true"
+          />
         </RibbonGroup>
         <RibbonSep />
         <RibbonGroup label="导出">
@@ -303,6 +316,8 @@
     <DocumentPropertiesDialog v-model="docPropsVisible" />
     <OfdMergeDialog v-model="mergeDialogVisible" />
     <PdfMergeDialog v-model="pdfMergeDialogVisible" />
+    <OfdSplitDialog v-model="ofdSplitDialogVisible" />
+    <PdfSplitDialog v-model="pdfSplitDialogVisible" />
     <ImageCropDialog v-model="store.imageCropDialogVisible" />
   </div>
 </template>
@@ -317,17 +332,19 @@ import {
   Printer, FolderOpened, DocumentChecked, CopyDocument,
   InfoFilled, Rank, FullScreen, View, Expand, Crop,
   Document, Reading, Sort, Picture, Files, PictureFilled,
-  Lock, Key, Stamp, Medal, QuestionFilled, Clock,
+  Lock, Key, Stamp, Medal, QuestionFilled, Clock, Scissor,
 } from '@element-plus/icons-vue'
 import { useEditorStore } from '@/stores/editorStore'
 import {
-  ofdApi, downloadBlob, promptDownloadBlob,
+  ofdApi, downloadBlob,
   pickOfdSaveTarget, writeBlobToSaveTarget,
 } from '@/api/ofdApi'
 import RibbonButton from '@/components/RibbonButton.vue'
 import DocumentPropertiesDialog from '@/components/DocumentPropertiesDialog.vue'
 import OfdMergeDialog from '@/components/OfdMergeDialog.vue'
 import PdfMergeDialog from '@/components/PdfMergeDialog.vue'
+import OfdSplitDialog from '@/components/OfdSplitDialog.vue'
+import PdfSplitDialog from '@/components/PdfSplitDialog.vue'
 import ImageCropDialog from '@/components/ImageCropDialog.vue'
 
 const HandIcon = defineComponent({
@@ -358,7 +375,13 @@ const stampInputRef = ref<HTMLInputElement>()
 const docPropsVisible = ref(false)
 const mergeDialogVisible = ref(false)
 const pdfMergeDialogVisible = ref(false)
+const ofdSplitDialogVisible = ref(false)
+const pdfSplitDialogVisible = ref(false)
 const activeTab = ref('home')
+
+const canSplitOfd = computed(
+    () => !!store.document && !!store.fileId && (store.document.pageCount ?? 0) > 1,
+)
 
 const tabs = [
   { id: 'file', label: '文件', disabled: false },
@@ -474,11 +497,8 @@ const predefineColors = [
 
 async function handleDeleteAnnotation() {
   if (!store.selectedAnnotationId) return
-  try {
-    await ElMessageBox.confirm('确定删除该注释吗？', '确认删除', { type: 'warning' })
-    await store.deleteAnnotation(store.selectedAnnotationId)
-    ElMessage.success('注释已删除')
-  } catch { /* 取消 */ }
+  await store.deleteAnnotation(store.selectedAnnotationId)
+  ElMessage.success('注释已删除')
 }
 
 async function handleOfdUpload(e: Event) {
@@ -610,8 +630,8 @@ async function handleExportPdf() {
   try {
     const blob = await ofdApi.toPdf(store.currentFile)
     const filename = `${store.document?.title ?? 'export'}.pdf`
-    const saved = await promptDownloadBlob(blob, filename)
-    if (saved) ElMessage.success('PDF 已开始下载')
+    downloadBlob(blob, filename)
+    ElMessage.success('PDF 已开始下载')
   } catch (err: any) {
     ElMessage.error(err.message || '导出失败')
   } finally {
@@ -648,11 +668,8 @@ function handleReorderHint() {
 }
 
 async function handleDeletePage() {
-  try {
-    await ElMessageBox.confirm(`确定删除第${store.currentPageIndex + 1}页吗？`, '确认删除', { type: 'warning' })
-    store.deletePage(store.currentPageIndex)
-    ElMessage.success('页面已删除')
-  } catch { /* 取消 */ }
+  store.deletePage(store.currentPageIndex)
+  ElMessage.success('页面已删除')
 }
 </script>
 

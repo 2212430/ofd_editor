@@ -2,13 +2,16 @@ package com.ofdeditor.controller;
 
 import com.ofdeditor.dto.AnnotationDTO;
 import com.ofdeditor.dto.OfdDocumentDTO;
+import com.ofdeditor.dto.SplitOfdRequest;
 import com.ofdeditor.service.AnnotationService;
 import com.ofdeditor.service.ConversionService;
 import com.ofdeditor.service.OfdCacheService;
 import com.ofdeditor.service.OfdMergeService;
 import com.ofdeditor.service.OfdParseService;
 import com.ofdeditor.service.OfdRebuildService;
+import com.ofdeditor.service.OfdSplitService;
 import com.ofdeditor.service.PdfMergeService;
+import com.ofdeditor.util.SplitPayloadUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpHeaders;
@@ -30,6 +33,7 @@ public class OfdController {
 
     private final OfdParseService parseService;
     private final OfdMergeService mergeService;
+    private final OfdSplitService splitService;
     private final PdfMergeService pdfMergeService;
     private final ConversionService conversionService;
     private final OfdRebuildService rebuildService;
@@ -186,6 +190,94 @@ public class OfdController {
         } catch (Exception e) {
             log.error("合并 PDF 失败: {}", e.getMessage(), e);
             return ResponseEntity.internalServerError().body("合并失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 拆分当前缓存中的 OFD（按页码拆成两份，打包为二进制供前端解包下载）
+     */
+    @PostMapping("/split-ofd")
+    public ResponseEntity<?> splitOfd(@RequestBody SplitOfdRequest request) {
+        try {
+            if (request.getFileId() == null || request.getFileId().isBlank()) {
+                return ResponseEntity.badRequest().body("缺少 fileId，请先打开 OFD 文件");
+            }
+            byte[] cached = cacheService.get(request.getFileId());
+            if (cached == null) {
+                return ResponseEntity.badRequest().body("文件缓存已失效，请重新打开 OFD 后再拆分");
+            }
+
+            OfdSplitService.SplitPair pair =
+                    splitService.split(cached, request.getSplitAfterPage());
+            String base = request.getTitle() != null ? request.getTitle() : "文档";
+            String name1 = SplitPayloadUtil.buildPartFilename(base, 1, "ofd");
+            String name2 = SplitPayloadUtil.buildPartFilename(base, 2, "ofd");
+            byte[] payload = SplitPayloadUtil.pack(name1, pair.part1(), name2, pair.part2());
+
+            log.info("OFD 拆分成功: fileId={}, 拆分点={}", request.getFileId(), request.getSplitAfterPage());
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_TYPE, "application/octet-stream")
+                    .body(payload);
+
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(e.getMessage());
+        } catch (Exception e) {
+            log.error("拆分 OFD 失败: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body("拆分失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 拆分 PDF（需上传原生 PDF，非编辑器内栅格化 OFD）
+     */
+    @PostMapping("/split-pdf")
+    public ResponseEntity<?> splitPdf(
+            @RequestParam("file") MultipartFile file,
+            @RequestParam("splitAfterPage") int splitAfterPage) {
+        try {
+            if (file.isEmpty()) {
+                return ResponseEntity.badRequest().body("请选择 PDF 文件");
+            }
+            String filename = file.getOriginalFilename();
+            if (!isPdfFilename(filename)) {
+                return ResponseEntity.badRequest().body("请上传 PDF 格式文件");
+            }
+
+            PdfMergeService.SplitPair pair =
+                    pdfMergeService.splitPdf(file.getBytes(), splitAfterPage);
+            String base = stripPdfExt(filename);
+            String name1 = SplitPayloadUtil.buildPartFilename(base, 1, "pdf");
+            String name2 = SplitPayloadUtil.buildPartFilename(base, 2, "pdf");
+            byte[] payload = SplitPayloadUtil.pack(name1, pair.part1(), name2, pair.part2());
+
+            log.info("PDF 拆分成功: {}, 拆分点={}", filename, splitAfterPage);
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_TYPE, "application/octet-stream")
+                    .body(payload);
+
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(e.getMessage());
+        } catch (Exception e) {
+            log.error("拆分 PDF 失败: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body("拆分失败: " + e.getMessage());
+        }
+    }
+
+    /** 读取 PDF 页数（用于拆分对话框校验） */
+    @PostMapping("/pdf-page-count")
+    public ResponseEntity<?> pdfPageCount(@RequestParam("file") MultipartFile file) {
+        try {
+            if (file.isEmpty()) {
+                return ResponseEntity.badRequest().body("请选择 PDF 文件");
+            }
+            if (!isPdfFilename(file.getOriginalFilename())) {
+                return ResponseEntity.badRequest().body("请上传 PDF 格式文件");
+            }
+            int count = pdfMergeService.countPages(file.getBytes());
+            return ResponseEntity.ok(Map.of("pageCount", count));
+        } catch (Exception e) {
+            log.error("读取 PDF 页数失败: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body("读取页数失败: " + e.getMessage());
         }
     }
 

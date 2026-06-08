@@ -266,7 +266,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { Pointer, RefreshLeft, Delete, Crop } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { useEditorStore } from '@/stores/editorStore'
 import type { ElementData, AnnotationData } from '@/types'
 import { ANNOTATION_TYPE_LABEL as annTypeLabel } from '@/utils/annotationLabels'
@@ -336,11 +336,8 @@ function updateAnnotation(changes: Partial<AnnotationData>) {
 
 async function handleDeleteAnnotation() {
   if (!store.selectedAnnotationId) return
-  try {
-    await ElMessageBox.confirm('确定删除该注释吗？', '确认删除', { type: 'warning' })
-    await store.deleteAnnotation(store.selectedAnnotationId)
-    ElMessage.success('注释已删除')
-  } catch { /* 取消 */ }
+  await store.deleteAnnotation(store.selectedAnnotationId)
+  ElMessage.success('注释已删除')
 }
 
 // ─── OFD 元素 ─────────────────────────────────────────────────────────────
