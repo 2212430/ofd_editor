@@ -286,6 +286,17 @@ function handleGlobalKeydown(e: KeyboardEvent) {
   if (!store.document) return
   if (isEditableTarget(e.target)) return
 
+  // Delete / Backspace：删除选中的元素（文本 / 图片 / 矢量）
+  if (e.key === 'Delete' || e.key === 'Backspace') {
+    if (store.canDeleteSelectedElement) {
+      e.preventDefault()
+      if (store.deleteSelectedElement()) {
+        ElMessage.success('元素已删除，保存后生效')
+      }
+    }
+    return
+  }
+
   const mod = e.ctrlKey || e.metaKey
   if (!mod) return
 

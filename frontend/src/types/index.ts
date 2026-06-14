@@ -67,6 +67,8 @@ export interface ElementData {
     /** 用户新插入的元素（如导入图片），保存时由后端追加到 OFD */
     isNew?: boolean
     isDirty?: boolean
+    /** 标记删除：保留在列表中以便保存时通知后端移除原 OFD 节点；前端渲染时过滤 */
+    isDeleted?: boolean
     /** 图片像素已变更（裁剪等），保存时需写回 OFD 资源 */
     imageContentDirty?: boolean
     /** 图片内容版本号，变更后强制画布重建 Image 节点 */

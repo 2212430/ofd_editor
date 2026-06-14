@@ -62,6 +62,7 @@
           <RibbonButton label="撤销" :icon="RefreshLeft" :disabled="!store.canUndo" @click="store.undo()" />
           <RibbonButton label="重做" :icon="RefreshRight" :disabled="!store.canRedo" @click="store.redo()" />
           <RibbonButton label="重置元素" :icon="RefreshLeft" :disabled="!store.selectedElement?.isDirty" @click="handleResetElement" />
+          <RibbonButton label="删除元素" :icon="Delete" :disabled="!store.canDeleteSelectedElement" @click="handleDeleteElement" />
         </RibbonGroup>
         <RibbonSep />
         <RibbonGroup label="缩放">
@@ -218,6 +219,7 @@
         <RibbonGroup label="对象">
           <RibbonButton label="选择" :icon="Pointer" :active="store.currentTool === 'SELECT'" @click="store.setTool('SELECT')" />
           <RibbonButton label="重置元素" :icon="RefreshLeft" :disabled="!store.selectedElement?.isDirty" @click="handleResetElement" />
+          <RibbonButton label="删除元素" :icon="Delete" :disabled="!store.canDeleteSelectedElement" @click="handleDeleteElement" />
         </RibbonGroup>
         <RibbonSep />
         <RibbonGroup label="页面结构">
@@ -581,12 +583,28 @@ async function handlePdfImport(e: Event) {
   }
 }
 
+/** 原生 PDF：先把批注烘焙回 PDF，再「PDF→图片→OFD」转换（不保留原矢量格式） */
+async function buildOfdBlobFromPdf(): Promise<Blob> {
+  const pdfBlob = await store.getAnnotatedPdfBlob()
+  if (!pdfBlob) throw new Error('PDF 导出失败')
+  const baseName = store.document?.title ?? 'export'
+  const pdfFile = new File([pdfBlob], `${baseName}.pdf`, { type: 'application/pdf' })
+  return ofdApi.fromPdf(pdfFile)
+}
+
 async function handleSaveOfd() {
   if (!store.document) return
   if (store.isPdfDocument) {
-    const filename = `${store.document.title ?? 'export'}.pdf`
-    await store.exportWithAnnotations(filename)
-    ElMessage.success('已导出含批注的 PDF')
+    store.setLoading(true, '正在转换为 OFD...')
+    try {
+      const blob = await buildOfdBlobFromPdf()
+      downloadBlob(blob, `${store.document.title ?? 'export'}.ofd`)
+      ElMessage.success('已保存为 OFD')
+    } catch (err: any) {
+      ElMessage.error(err.message || '保存失败')
+    } finally {
+      store.setLoading(false)
+    }
     return
   }
   store.setLoading(true, '正在保存...')
@@ -605,19 +623,14 @@ async function handleSaveOfd() {
 async function handleSaveAs() {
   if (!store.document) return
 
-  if (store.isPdfDocument) {
-    const filename = `${store.document.title ?? 'export'}.pdf`
-    await store.exportWithAnnotations(filename)
-    ElMessage.success('已导出含批注的 PDF')
-    return
-  }
-
   const target = await pickOfdSaveTarget(store.document.title)
   if (!target) return
 
   store.setLoading(true, '正在生成 OFD 文件...')
   try {
-    const blob = await ofdApi.saveOfd(store.getDocumentForSave()!)
+    const blob = store.isPdfDocument
+      ? await buildOfdBlobFromPdf()
+      : await ofdApi.saveOfd(store.getDocumentForSave()!)
     await writeBlobToSaveTarget(blob, target)
     store.markNewElementsPersisted()
     ElMessage.success(`已另存为：${target.filename}`)
@@ -658,6 +671,22 @@ function handleResetElement() {
   if (!store.selectedElementId) return
   store.resetElement(store.currentPageIndex, store.selectedElementId)
   ElMessage.success('已重置到原始状态')
+}
+
+async function handleDeleteElement() {
+  if (!store.canDeleteSelectedElement) return
+  try {
+    await ElMessageBox.confirm('确定删除选中的元素吗？删除后保存即从文档中移除。', '删除元素', {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+    })
+  } catch {
+    return
+  }
+  if (store.deleteSelectedElement()) {
+    ElMessage.success('元素已删除，保存后生效')
+  }
 }
 
 function handleInsertPage() {

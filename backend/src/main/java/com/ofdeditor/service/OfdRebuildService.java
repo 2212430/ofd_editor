@@ -470,7 +470,13 @@ public class OfdRebuildService {
 
         for (ElementDTO el : dirtyElements) {
             try {
-                if (allowInsertNew && Boolean.TRUE.equals(el.getIsNew()) && "IMAGE".equals(el.getType())) {
+                if (Boolean.TRUE.equals(el.getIsDeleted())) {
+                    // 新插入但未保存的元素若被删，前端已从列表剔除，不会到这里；
+                    // 这里只处理「已有 OFD 元素」的删除：移除匹配节点
+                    if (!Boolean.TRUE.equals(el.getIsNew())) {
+                        deleteElementNode(root, el);
+                    }
+                } else if (allowInsertNew && Boolean.TRUE.equals(el.getIsNew()) && "IMAGE".equals(el.getType())) {
                     insertNewImageElement(doc, root, el, zipEntries, docPrefix);
                 } else {
                     patchElement(doc, root, el, zipEntries, docPrefix);
@@ -496,6 +502,43 @@ public class OfdRebuildService {
             case "TEXT" -> patchTextElement(doc, root, el);
             case "IMAGE" -> patchImageElement(doc, root, el, zipEntries, docPrefix);
             case "PATH" -> patchPathElement(doc, root, el);
+        }
+    }
+
+    /**
+     * 删除元素：按类型定位 OFD 对象节点（优先 xmlObjId，其次坐标匹配），从父节点移除。
+     */
+    private void deleteElementNode(Element root, ElementDTO el) {
+        String type = el.getType();
+        if (type == null) return;
+        String localName = switch (type) {
+            case "TEXT" -> "TextObject";
+            case "IMAGE" -> "ImageObject";
+            case "PATH" -> "PathObject";
+            default -> null;
+        };
+        if (localName == null) {
+            log.warn("不支持删除的元素类型: {} id={}", type, el.getId());
+            return;
+        }
+
+        NodeList nodes = getElementsByLocalName(root, localName);
+        Element matched = null;
+        if (isNotBlank(el.getXmlObjId())) {
+            matched = findByXmlObjId(nodes, el.getXmlObjId());
+        }
+        if (matched == null) {
+            matched = findBestMatchByBoundary(nodes, el);
+        }
+        if (matched == null) {
+            log.warn("删除元素未找到匹配节点: type={}, id={}, xmlObjId={}",
+                    type, el.getId(), el.getXmlObjId());
+            return;
+        }
+        Node parent = matched.getParentNode();
+        if (parent != null) {
+            parent.removeChild(matched);
+            log.info("已删除 OFD 节点: type={}, id={}, xmlObjId={}", type, el.getId(), el.getXmlObjId());
         }
     }
 

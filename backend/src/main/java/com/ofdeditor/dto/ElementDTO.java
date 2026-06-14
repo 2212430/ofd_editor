@@ -79,6 +79,8 @@ public class ElementDTO {
     private Boolean isNew;
     // 是否被修改
     private Boolean isDirty;
+    /** 标记删除：保存时从原 OFD 页面 XML 移除匹配节点 */
+    private Boolean isDeleted;
     /** 图片像素内容已变更（裁剪/替换），保存时需写回 Res 二进制 */
     private Boolean imageContentDirty;
 

@@ -258,6 +258,15 @@
         >
           重置到原始状态
         </el-button>
+
+        <el-button
+            v-if="store.canDeleteSelectedElement"
+            type="danger" plain size="small" style="width:100%; margin: 8px 0 0 0"
+            :icon="Delete"
+            @click="handleDeleteElement"
+        >
+          删除元素
+        </el-button>
       </div>
     </template>
   </div>
@@ -266,7 +275,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { Pointer, RefreshLeft, Delete, Crop } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useEditorStore } from '@/stores/editorStore'
 import type { ElementData, AnnotationData } from '@/types'
 import { ANNOTATION_TYPE_LABEL as annTypeLabel } from '@/utils/annotationLabels'
@@ -363,6 +372,22 @@ function handleReset() {
 function handleOpenImageCrop() {
   if (!store.openImageCropDialog()) {
     ElMessage.warning('当前图片无法裁剪，请确认已加载图片数据')
+  }
+}
+
+async function handleDeleteElement() {
+  if (!store.canDeleteSelectedElement) return
+  try {
+    await ElMessageBox.confirm('确定删除选中的元素吗？删除后保存即从文档中移除。', '删除元素', {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+    })
+  } catch {
+    return
+  }
+  if (store.deleteSelectedElement()) {
+    ElMessage.success('元素已删除，保存后生效')
   }
 }
 </script>

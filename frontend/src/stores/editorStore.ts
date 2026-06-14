@@ -91,6 +91,13 @@ export const useEditorStore = defineStore('editor', () => {
         ) ?? null
     })
 
+    /** 后端 deleteElementNode 支持移除的元素类型（TEXT / IMAGE / PATH） */
+    const DELETABLE_ELEMENT_TYPES = ['TEXT', 'IMAGE', 'PATH'] as const
+    const canDeleteSelectedElement = computed(() => {
+        const t = selectedElement.value?.type
+        return !!t && (DELETABLE_ELEMENT_TYPES as readonly string[]).includes(t)
+    })
+
     const canUndo = computed(() => historyIndex.value > 0)
     const canRedo = computed(() => historyIndex.value < history.value.length - 1)
 
@@ -736,6 +743,35 @@ export const useEditorStore = defineStore('editor', () => {
         schedulePageThumbnailRefresh(pageIndex)
     }
 
+    /**
+     * 删除元素：
+     * - 新插入未保存的元素（isNew）：直接从列表移除，无需后端
+     * - 已有 OFD 元素：标记 isDeleted（+isDirty），保留在列表里，保存时由后端移除原节点
+     */
+    function deleteElement(pageIndex: number, elementId: string): boolean {
+        if (!document.value) return false
+        const page = document.value.pages[pageIndex]
+        const idx = page?.elements.findIndex((e) => e.id === elementId) ?? -1
+        if (idx === -1) return false
+        const element = page!.elements[idx]
+
+        if (element.isNew) {
+            page!.elements.splice(idx, 1)
+        } else {
+            element.isDeleted = true
+            element.isDirty = true
+        }
+        if (selectedElementId.value === elementId) selectedElementId.value = null
+        saveToHistory()
+        schedulePageThumbnailRefresh(pageIndex)
+        return true
+    }
+
+    function deleteSelectedElement(): boolean {
+        if (!selectedElementId.value) return false
+        return deleteElement(currentPageIndex.value, selectedElementId.value)
+    }
+
     function insertPage(position: number) {
         if (!document.value) return
         const newPage: PageData = {
@@ -1054,10 +1090,12 @@ export const useEditorStore = defineStore('editor', () => {
         }
     }
 
-    /** 保存成功后调用：同步 original*、清除 dirty / isNew / imageContentDirty */
+    /** 保存成功后调用：同步 original*、清除 dirty / isNew / imageContentDirty，并清掉已删除元素 */
     function markNewElementsPersisted() {
         if (!document.value) return
         for (const page of document.value.pages) {
+            // 已标记删除的元素在保存写回后从列表彻底移除
+            page.elements = page.elements.filter((el) => !el.isDeleted)
             for (const el of page.elements) {
                 if (el.isNew) el.isNew = false
                 el.imageContentDirty = false
@@ -1291,6 +1329,12 @@ export const useEditorStore = defineStore('editor', () => {
         }
     }
 
+    /** 返回当前原生 PDF 烘焙批注后的 PDF blob（不触发下载），供「保存为 OFD」等二次转换使用 */
+    async function getAnnotatedPdfBlob(): Promise<Blob | null> {
+        if (!fileId.value || documentKind.value !== 'pdf') return null
+        return ofdApi.exportPdfWithAnnotations(fileId.value, buildPdfExportPayload())
+    }
+
     return {
         // ── 原有状态 ──
         document, currentPageIndex, pageViewMode, viewRotation, selectedElementId,
@@ -1305,7 +1349,7 @@ export const useEditorStore = defineStore('editor', () => {
         pendingStampImage, hasPendingStamp,
         pageThumbnails, thumbnailLoadingPages, thumbnailLoadedCount, isGeneratingThumbnails,
         // ── 原有计算属性 ──
-        currentPage, selectedElement, canUndo, canRedo, isPdfDocument,
+        currentPage, selectedElement, canDeleteSelectedElement, canUndo, canRedo, isPdfDocument,
         // ── 注释计算属性 ──
         currentPageAnnotations, selectedAnnotation,
         isHandTool, isSelectTool, isAnnotationTool,
@@ -1316,7 +1360,8 @@ export const useEditorStore = defineStore('editor', () => {
         selectElement, setScale, fitToWidth, fitToPage,
         rotateViewClockwise, rotateViewCounterClockwise, resetViewRotation,
         registerEditorAreaResolver, setLoading,
-        updateElement, resetElement, importImageToPage, applyImageCrop,
+        updateElement, resetElement, deleteElement, deleteSelectedElement,
+        importImageToPage, applyImageCrop,
         canCropSelectedImage, openImageCropDialog,
         insertPage, deletePage, movePage, copyPage, reorderPages,
         saveToHistory, resetHistory, commitHistoryBaseline, undo, redo,
@@ -1328,6 +1373,7 @@ export const useEditorStore = defineStore('editor', () => {
         addAnnotation, updateAnnotation, deleteAnnotation,
         loadAllAnnotations, getAnnotationsByPage,
         exportWithAnnotations,
+        getAnnotatedPdfBlob,
         setPageThumbnail, registerThumbnailCaptureHook,
         requestPageThumbnail, isPageThumbnailLoading,
     }

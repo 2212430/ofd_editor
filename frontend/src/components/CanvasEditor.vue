@@ -30,7 +30,7 @@
             :config="pdfBgConfig"
         />
 
-        <template v-for="element in page.elements" :key="element.id">
+        <template v-for="element in visibleElements" :key="element.id">
           <v-group
               v-if="element.type === 'TEXT' && isCurrencySplitText(element)"
               :config="getCurrencyGroupConfig(element)"
@@ -271,6 +271,9 @@ const props = withDefaults(
 const store = useEditorStore()
 
 const renderScale = computed(() => props.fixedScale ?? store.scale)
+
+// 渲染时过滤掉被标记删除的元素（保存时再由后端移除原 OFD 节点）
+const visibleElements = computed(() => props.page.elements.filter((el) => !el.isDeleted))
 
 // ─────────────────────────────────────────────
 // Konva 引用
