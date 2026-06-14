@@ -229,9 +229,6 @@
         <RibbonSep />
         <RibbonGroup label="插入">
           <RibbonButton label="导入图片" :icon="Picture" :disabled="!store.document" @click="imageInputRef?.click()" />
-        </RibbonGroup>
-        <RibbonSep />
-        <RibbonGroup label="高级">
           <RibbonButton
               label="图片裁剪"
               :icon="Crop"
@@ -239,7 +236,6 @@
               tooltip="裁剪当前选中的图片元素"
               @click="handleOpenImageCrop"
           />
-          <RibbonButton label="路径编辑" :icon="EditPen" disabled tooltip="即将推出" @click="comingSoon" />
         </RibbonGroup>
       </template>
 
@@ -339,6 +335,7 @@ import {
   ofdApi, downloadBlob,
   pickOfdSaveTarget, writeBlobToSaveTarget,
 } from '@/api/ofdApi'
+import { openNativePdf } from '@/utils/openPdf'
 import RibbonButton from '@/components/RibbonButton.vue'
 import DocumentPropertiesDialog from '@/components/DocumentPropertiesDialog.vue'
 import OfdMergeDialog from '@/components/OfdMergeDialog.vue'
@@ -392,8 +389,6 @@ const tabs = [
   { id: 'convert', label: '转换', disabled: false },
   { id: 'form', label: '表单', disabled: true },
   { id: 'protect', label: '保护', disabled: false },
-  { id: 'share', label: '共享', disabled: true },
-  { id: 'cloud', label: '云服务', disabled: true },
   { id: 'help', label: '帮助', disabled: false },
 ]
 
@@ -441,10 +436,11 @@ function showHelp() {
   ElMessageBox.alert(
       '1. 「文件」打开 OFD 或导入 PDF\n' +
       '2. 「主页」选择工具并编辑页面元素\n' +
-      '3. 「编辑 → 插入」可导入图片到当前页\n' +
-      '4. 「注释 → 导入图章」选择图片后点击页面放置图章\n' +
-      '5. 「注释」添加高亮、图形等批注\n' +
-      '6. 「转换」导出 PDF；「文件 → 打印」输出纸质或 PDF',
+      '3. Ctrl+Z 撤销、Ctrl+Y 或 Ctrl+Shift+Z 重做\n' +
+      '4. 「编辑 → 插入」可导入图片到当前页\n' +
+      '5. 「注释 → 导入图章」选择图片后点击页面放置图章\n' +
+      '6. 「注释」添加高亮、图形等批注\n' +
+      '7. 「转换」导出 PDF；「文件 → 打印」输出纸质或 PDF',
       '快速上手',
       { confirmButtonText: '知道了' }
   )
@@ -573,17 +569,12 @@ async function handleImageImport(e: Event) {
 async function handlePdfImport(e: Event) {
   const file = (e.target as HTMLInputElement).files?.[0]
   if (!file) return
-  store.setLoading(true, '正在转换PDF...')
+  store.setLoading(true, '正在打开PDF...')
   try {
-    const blob = await ofdApi.fromPdf(file)
-    const ofdFile = new File([blob], file.name.replace('.pdf', '.ofd'))
-    const doc = await ofdApi.parseOfd(ofdFile)
-    store.setDocument(doc)
-    store.setCurrentFile(ofdFile, 'pdf')
-    await store.loadAllAnnotations()
-    ElMessage.success('PDF转换成功！')
+    await openNativePdf(file)
+    ElMessage.success('PDF 已打开（原生渲染，可批注）')
   } catch (err: any) {
-    ElMessage.error(err.message || 'PDF转换失败')
+    ElMessage.error(err.message || 'PDF打开失败')
   } finally {
     store.setLoading(false)
     ;(e.target as HTMLInputElement).value = ''
@@ -592,6 +583,12 @@ async function handlePdfImport(e: Event) {
 
 async function handleSaveOfd() {
   if (!store.document) return
+  if (store.isPdfDocument) {
+    const filename = `${store.document.title ?? 'export'}.pdf`
+    await store.exportWithAnnotations(filename)
+    ElMessage.success('已导出含批注的 PDF')
+    return
+  }
   store.setLoading(true, '正在保存...')
   try {
     const blob = await ofdApi.saveOfd(store.getDocumentForSave()!)
@@ -607,6 +604,13 @@ async function handleSaveOfd() {
 
 async function handleSaveAs() {
   if (!store.document) return
+
+  if (store.isPdfDocument) {
+    const filename = `${store.document.title ?? 'export'}.pdf`
+    await store.exportWithAnnotations(filename)
+    ElMessage.success('已导出含批注的 PDF')
+    return
+  }
 
   const target = await pickOfdSaveTarget(store.document.title)
   if (!target) return
@@ -625,6 +629,17 @@ async function handleSaveAs() {
 }
 
 async function handleExportPdf() {
+  if (!store.document) { ElMessage.warning('请先打开文件'); return }
+
+  // 原生 PDF：把注释非破坏地烘焙回原 PDF
+  if (store.isPdfDocument) {
+    const filename = `${store.document.title ?? 'export'}.pdf`
+    await store.exportWithAnnotations(filename)
+    ElMessage.success('PDF 已开始下载')
+    return
+  }
+
+  // OFD 文档：OFD → PDF
   if (!store.currentFile) { ElMessage.warning('请先打开OFD文件'); return }
   store.setLoading(true, '正在导出PDF（页数较多时请耐心等待）...')
   try {

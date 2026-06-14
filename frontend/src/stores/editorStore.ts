@@ -12,6 +12,13 @@ import {
     type CropRect,
 } from '@/utils/imageCrop'
 
+/** 撤销栈条目：文档 + 注释 + 当前页，一步回退完整编辑状态 */
+interface HistoryEntry {
+    document: DocumentData
+    annotations: Record<number, AnnotationData[]>
+    currentPageIndex: number
+}
+
 export const useEditorStore = defineStore('editor', () => {
 
     // ==================== 原有状态 ====================
@@ -26,6 +33,8 @@ export const useEditorStore = defineStore('editor', () => {
     const loadingText = ref('处理中...')
     const currentFile = ref<File | null>(null)
     const documentSource = ref<DocumentSource | null>(null)
+    /** 当前文档的真实承载格式：ofd（含 PDF→OFD 老路径）或 pdf（原生 PDF.js 渲染） */
+    const documentKind = ref<'ofd' | 'pdf'>('ofd')
     const fileId = ref<string | null>(null)
 
     // 打印对话框可见性（跨组件协调：Toolbar 打开、App 编排打印）
@@ -33,8 +42,9 @@ export const useEditorStore = defineStore('editor', () => {
     /** 图片裁剪对话框（Toolbar / 属性面板共用） */
     const imageCropDialogVisible = ref(false)
 
-    const history = ref<DocumentData[]>([])
+    const history = ref<HistoryEntry[]>([])
     const historyIndex = ref(-1)
+    let historySyncInProgress = false
     /**
      * 撤销 / 重做触发后单调递增。CanvasEditor 监听该计数并显式调用 Konva stage.batchDraw()，
      * 兜底 vue-konva deep watcher 在 ref 整体替换 + 多页文本场景下偶尔漏发的 setAttrs。
@@ -98,6 +108,8 @@ export const useEditorStore = defineStore('editor', () => {
         }
         return null
     })
+
+    const isPdfDocument = computed(() => documentKind.value === 'pdf')
 
     const isHandTool = computed(() => currentTool.value === 'HAND')
     const isSelectTool = computed(() => currentTool.value === 'SELECT')
@@ -298,8 +310,9 @@ export const useEditorStore = defineStore('editor', () => {
         })
     }
 
-    function setDocument(doc: DocumentData) {
+    function setDocument(doc: DocumentData, kind: 'ofd' | 'pdf' = 'ofd') {
         if (doc.fileId) fileId.value = doc.fileId
+        documentKind.value = kind
         document.value = doc
         ensurePageIds()
         currentPageIndex.value = 0
@@ -310,7 +323,7 @@ export const useEditorStore = defineStore('editor', () => {
         annotationListScope.value = 'current'
         clearPageThumbnails()
         viewRotation.value = 0
-        saveToHistory()
+        resetHistory()
         void nextTick(() => { fitToWidth() })
     }
 
@@ -863,16 +876,90 @@ export const useEditorStore = defineStore('editor', () => {
         return position
     }
 
-    function saveToHistory() {
+    function cloneAnnotationsForHistory(): Record<number, AnnotationData[]> {
+        const out: Record<number, AnnotationData[]> = {}
+        for (const key of Object.keys(annotationsMap)) {
+            out[Number(key)] = JSON.parse(JSON.stringify(annotationsMap[Number(key)] ?? []))
+        }
+        return out
+    }
+
+    function applyAnnotationsMap(source: Record<number, AnnotationData[]>) {
+        for (const key of Object.keys(annotationsMap)) {
+            delete annotationsMap[Number(key)]
+        }
+        for (const [k, v] of Object.entries(source)) {
+            annotationsMap[Number(k)] = JSON.parse(JSON.stringify(v))
+        }
+    }
+
+    function captureHistoryEntry(): HistoryEntry {
+        return {
+            document: JSON.parse(JSON.stringify(document.value!)),
+            annotations: cloneAnnotationsForHistory(),
+            currentPageIndex: currentPageIndex.value,
+        }
+    }
+
+    function resetHistory() {
+        history.value = []
+        historyIndex.value = -1
+    }
+
+    /** 文档与注释加载完成后，将当前状态设为撤销基线（不可再撤销） */
+    function commitHistoryBaseline() {
         if (!document.value) return
-        const snapshot = JSON.parse(JSON.stringify(document.value))
+        history.value = [captureHistoryEntry()]
+        historyIndex.value = 0
+    }
+
+    function saveToHistory() {
+        if (!document.value || historySyncInProgress) return
+        const entry = captureHistoryEntry()
         history.value = history.value.slice(0, historyIndex.value + 1)
-        history.value.push(snapshot)
+        history.value.push(entry)
         if (history.value.length > 50) {
             history.value.shift()
-            historyIndex.value = history.value.length - 1
-        } else {
-            historyIndex.value = history.value.length - 1
+        }
+        historyIndex.value = history.value.length - 1
+    }
+
+    /** 撤销/重做后，将本地注释快照写回后端缓存，保证导出与保存一致 */
+    async function syncAnnotationsAfterRestore() {
+        if (!fileId.value || historySyncInProgress) return
+        historySyncInProgress = true
+        try {
+            const serverAll = await ofdApi.getAllAnnotations(fileId.value)
+            for (const list of Object.values(serverAll)) {
+                for (const ann of list) {
+                    await ofdApi.deleteAnnotation(fileId.value, ann.id)
+                }
+            }
+
+            const rebuilt: Record<number, AnnotationData[]> = {}
+            const pageIndices = Object.keys(annotationsMap).map(Number).sort((a, b) => a - b)
+            for (const pageIdx of pageIndices) {
+                const list = annotationsMap[pageIdx] ?? []
+                if (list.length === 0) continue
+                rebuilt[pageIdx] = []
+                for (const ann of list) {
+                    const { id, createdAt, updatedAt, ...payload } = ann
+                    const saved = await ofdApi.addAnnotation(
+                        fileId.value,
+                        payload as Omit<AnnotationData, 'id' | 'createdAt' | 'updatedAt'>,
+                    )
+                    rebuilt[pageIdx].push(saved)
+                }
+            }
+            applyAnnotationsMap(rebuilt)
+            const current = history.value[historyIndex.value]
+            if (current) {
+                current.annotations = cloneAnnotationsForHistory()
+            }
+        } catch (e) {
+            console.error('[editorStore] 撤销后注释同步失败:', e)
+        } finally {
+            historySyncInProgress = false
         }
     }
 
@@ -922,34 +1009,35 @@ export const useEditorStore = defineStore('editor', () => {
 
     function restoreFromHistory(idx: number) {
         if (idx < 0 || idx >= history.value.length) return
-        const snap = JSON.parse(JSON.stringify(history.value[idx]))
+        const entry = JSON.parse(JSON.stringify(history.value[idx])) as HistoryEntry
         if (!document.value) {
-            document.value = snap
+            document.value = entry.document
         } else {
-            applyInPlace(document.value, snap)
+            applyInPlace(document.value, entry.document)
         }
-        // 选中的元素如果在新快照里被删了，需要清掉选中态避免 PropertyPanel 报空指针
-        if (selectedElementId.value) {
-            const page = document.value?.pages[currentPageIndex.value]
-            const stillExists = page?.elements.some(e => e.id === selectedElementId.value)
-            if (!stillExists) selectedElementId.value = null
-        }
+        applyAnnotationsMap(entry.annotations)
+        const maxPage = Math.max(0, (document.value?.pageCount ?? 1) - 1)
+        currentPageIndex.value = Math.min(Math.max(0, entry.currentPageIndex), maxPage)
+        selectedElementId.value = null
+        selectedAnnotationId.value = null
     }
 
-    function undo() {
+    async function undo() {
         if (!canUndo.value) return
         historyIndex.value -= 1
         restoreFromHistory(historyIndex.value)
         renderVersion.value++
         schedulePageThumbnailRefresh(currentPageIndex.value, 400)
+        await syncAnnotationsAfterRestore()
     }
 
-    function redo() {
+    async function redo() {
         if (!canRedo.value) return
         historyIndex.value += 1
         restoreFromHistory(historyIndex.value)
         renderVersion.value++
         schedulePageThumbnailRefresh(currentPageIndex.value, 400)
+        await syncAnnotationsAfterRestore()
     }
 
     function getDocumentForSave(): DocumentData | null {
@@ -1062,6 +1150,7 @@ export const useEditorStore = defineStore('editor', () => {
             }
             annotationsMap[pageIdx].push(saved)
             schedulePageThumbnailRefresh(pageIdx, 400)
+            saveToHistory()
             return saved
         } catch (e) {
             console.error('[editorStore] 添加注释失败:', e)
@@ -1092,6 +1181,7 @@ export const useEditorStore = defineStore('editor', () => {
             if (affectedPageIndex !== null) {
                 schedulePageThumbnailRefresh(affectedPageIndex, 400)
             }
+            saveToHistory()
             return true
         } catch (e) {
             console.error('[editorStore] 更新注释失败:', e)
@@ -1130,6 +1220,7 @@ export const useEditorStore = defineStore('editor', () => {
             if (affectedPageIndex !== null) {
                 schedulePageThumbnailRefresh(affectedPageIndex, 400)
             }
+            saveToHistory()
             return true
         } catch (e) {
             console.error('[editorStore] 删除注释失败:', e)
@@ -1152,6 +1243,7 @@ export const useEditorStore = defineStore('editor', () => {
         } catch (e) {
             console.warn('[editorStore] 加载注释失败（可能暂无注释）:', e)
         } finally {
+            commitHistoryBaseline()
             requestPageThumbnail(currentPageIndex.value)
             requestPageThumbnail(0)
         }
@@ -1161,13 +1253,37 @@ export const useEditorStore = defineStore('editor', () => {
         return annotationsMap[pageIndex] ?? []
     }
 
+    /** 构造原生 PDF 导出负载：当前页序（含原始页号/空白页）+ 各页注释 */
+    function buildPdfExportPayload() {
+        const pages = (document.value?.pages ?? []).map((p) => ({
+            sourceIndex: p.sourcePageIndex ?? null,
+            widthMm: p.width,
+            heightMm: p.height,
+        }))
+        const annotations: Record<number, any[]> = {}
+        ;(document.value?.pages ?? []).forEach((_, idx) => {
+            const list = annotationsMap[idx] ?? []
+            if (list.length === 0) return
+            annotations[idx] = list.map((a) => {
+                const o: any = { ...a }
+                if (Array.isArray(o.pathPoints)) o.pathPoints = JSON.stringify(o.pathPoints)
+                return o
+            })
+        })
+        return { pages, annotations }
+    }
+
     async function exportWithAnnotations(filename?: string): Promise<void> {
         if (!fileId.value) return
         try {
             setLoading(true, '导出中...')
-            const blob = await ofdApi.exportWithAnnotations(fileId.value)
+            const isPdf = documentKind.value === 'pdf'
+            const blob = isPdf
+                ? await ofdApi.exportPdfWithAnnotations(fileId.value, buildPdfExportPayload())
+                : await ofdApi.exportWithAnnotations(fileId.value)
             const { downloadBlob } = await import('@/api/ofdApi')
-            downloadBlob(blob, filename ?? 'annotated.ofd')
+            const fallback = isPdf ? 'annotated.pdf' : 'annotated.ofd'
+            downloadBlob(blob, filename ?? fallback)
         } catch (e) {
             console.error('[editorStore] 导出失败:', e)
         } finally {
@@ -1178,7 +1294,7 @@ export const useEditorStore = defineStore('editor', () => {
     return {
         // ── 原有状态 ──
         document, currentPageIndex, pageViewMode, viewRotation, selectedElementId,
-        scale, isLoading, loadingText, currentFile, documentSource,
+        scale, isLoading, loadingText, currentFile, documentSource, documentKind,
         history, historyIndex, fileId, renderVersion,
         printDialogVisible,
         imageCropDialogVisible,
@@ -1189,7 +1305,7 @@ export const useEditorStore = defineStore('editor', () => {
         pendingStampImage, hasPendingStamp,
         pageThumbnails, thumbnailLoadingPages, thumbnailLoadedCount, isGeneratingThumbnails,
         // ── 原有计算属性 ──
-        currentPage, selectedElement, canUndo, canRedo,
+        currentPage, selectedElement, canUndo, canRedo, isPdfDocument,
         // ── 注释计算属性 ──
         currentPageAnnotations, selectedAnnotation,
         isHandTool, isSelectTool, isAnnotationTool,
@@ -1203,7 +1319,8 @@ export const useEditorStore = defineStore('editor', () => {
         updateElement, resetElement, importImageToPage, applyImageCrop,
         canCropSelectedImage, openImageCropDialog,
         insertPage, deletePage, movePage, copyPage, reorderPages,
-        saveToHistory, undo, redo, getDocumentForSave, markNewElementsPersisted,
+        saveToHistory, resetHistory, commitHistoryBaseline, undo, redo,
+        getDocumentForSave, markNewElementsPersisted,
         // ── 注释方法 ──
         setTool, setAnnotationColor, setAnnotationOpacity,
         setAnnotationLineWidth, setPendingStampImage, clearPendingStampImage,

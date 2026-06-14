@@ -2,6 +2,7 @@ package com.ofdeditor.controller;
 
 import com.ofdeditor.dto.AnnotationDTO;
 import com.ofdeditor.dto.OfdDocumentDTO;
+import com.ofdeditor.dto.PdfExportRequest;
 import com.ofdeditor.dto.SplitOfdRequest;
 import com.ofdeditor.service.AnnotationService;
 import com.ofdeditor.service.ConversionService;
@@ -11,6 +12,7 @@ import com.ofdeditor.service.OfdParseService;
 import com.ofdeditor.service.OfdRebuildService;
 import com.ofdeditor.service.OfdSplitService;
 import com.ofdeditor.service.PdfMergeService;
+import com.ofdeditor.service.PdfNativeService;
 import com.ofdeditor.util.SplitPayloadUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -35,6 +37,7 @@ public class OfdController {
     private final OfdMergeService mergeService;
     private final OfdSplitService splitService;
     private final PdfMergeService pdfMergeService;
+    private final PdfNativeService pdfNativeService;
     private final ConversionService conversionService;
     private final OfdRebuildService rebuildService;
     private final OfdCacheService cacheService;
@@ -85,6 +88,53 @@ public class OfdController {
 
         } catch (Exception e) {
             log.error("解析OFD失败: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body("解析失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 原生解析 PDF：不栅格化，仅返回每页可视尺寸，渲染交给前端 PDF.js。
+     * 缓存 PDF 原始字节并初始化空注释层，复用注释 CRUD 接口。
+     */
+    @PostMapping("/parse-pdf")
+    public ResponseEntity<?> parsePdf(@RequestParam("file") MultipartFile file) {
+        try {
+            log.info("收到原生PDF解析请求: {}, 大小: {} bytes",
+                    file.getOriginalFilename(), file.getSize());
+
+            if (file.isEmpty()) return ResponseEntity.badRequest().body("文件不能为空");
+
+            String filename = file.getOriginalFilename();
+            if (filename == null || !filename.toLowerCase().endsWith(".pdf"))
+                return ResponseEntity.badRequest().body("请上传PDF格式文件");
+
+            String fileId = UUID.randomUUID().toString();
+            byte[] fileBytes = file.getBytes();
+            cacheService.put(fileId, fileBytes);
+
+            OfdDocumentDTO result = pdfNativeService.parse(fileBytes, getNameWithoutExt(filename));
+            result.setFileId(fileId);
+
+            // 标记为 PDF（注释写回走导出烘焙，不写 OFD）
+            annotationService.markPdf(fileId);
+
+            // 导入 PDF 内已有的批注到注释缓存（前端打开后会自动加载显示）
+            try {
+                Map<Integer, List<AnnotationDTO>> existing =
+                        pdfNativeService.parseExistingAnnotations(fileBytes);
+                if (!existing.isEmpty()) {
+                    annotationService.initFromOfd(fileId, existing);
+                    annotationService.markPdf(fileId);
+                    log.info("导入PDF已有批注: fileId={}, 共{}页有批注", fileId, existing.size());
+                }
+            } catch (Exception e) {
+                log.warn("导入PDF已有批注失败（忽略）: {}", e.getMessage());
+            }
+
+            return ResponseEntity.ok(result);
+
+        } catch (Exception e) {
+            log.error("原生解析PDF失败: {}", e.getMessage(), e);
             return ResponseEntity.internalServerError().body("解析失败: " + e.getMessage());
         }
     }
@@ -481,6 +531,47 @@ public class OfdController {
 
         } catch (Exception e) {
             log.error("导出含注释OFD失败: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body("导出失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 导出含注释的 PDF（原生 PDF 文档）：把注释非破坏地烘焙回原 PDF，
+     * 并按前端给出的页面布局重建页序（支持重排/删除/插入空白/复制页）。
+     * POST /api/ofd/{fileId}/export-pdf
+     *
+     * body 可空：为空时按原序、用服务端缓存的注释烘焙。
+     */
+    @PostMapping("/{fileId}/export-pdf")
+    public ResponseEntity<?> exportPdfWithAnnotations(
+            @PathVariable("fileId") String fileId,
+            @RequestBody(required = false) PdfExportRequest request) {
+        try {
+            log.info("导出含注释PDF: fileId={}", fileId);
+
+            byte[] originalPdf = cacheService.get(fileId);
+            if (originalPdf == null) {
+                return ResponseEntity.badRequest().body("文件缓存已过期，请重新上传");
+            }
+
+            byte[] pdfBytes;
+            if (request != null && request.getPages() != null && !request.getPages().isEmpty()) {
+                pdfBytes = pdfNativeService.exportWithLayout(originalPdf, request);
+            } else {
+                Map<Integer, List<AnnotationDTO>> allAnnotations =
+                        annotationService.getAllAnnotations(fileId);
+                pdfBytes = pdfNativeService.bakeAnnotations(originalPdf, allAnnotations);
+            }
+
+            String filename = URLEncoder.encode("annotated.pdf", StandardCharsets.UTF_8);
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_TYPE, "application/pdf")
+                    .header(HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename*=UTF-8''" + filename)
+                    .body(pdfBytes);
+
+        } catch (Exception e) {
+            log.error("导出含注释PDF失败: {}", e.getMessage(), e);
             return ResponseEntity.internalServerError().body("导出失败: " + e.getMessage());
         }
     }

@@ -136,6 +136,19 @@ export const ofdApi = {
     },
 
     /**
+     * 原生解析 PDF（不栅格化）：仅返回页面尺寸 + fileId，页面由前端 PDF.js 渲染。
+     * POST /api/ofd/parse-pdf
+     */
+    parsePdfNative: async (file: File): Promise<DocumentData> => {
+        const form = new FormData()
+        form.append('file', file)
+        const res = await http.post<DocumentData>('/parse-pdf', form, {
+            timeout: 300_000,
+        })
+        return res.data
+    },
+
+    /**
      * 合并两个 OFD（第一个文件的页面在前，第二个在后）
      * POST /api/ofd/merge
      */
@@ -352,6 +365,26 @@ export const ofdApi = {
     exportWithAnnotations: async (fileId: string): Promise<Blob> => {
         const res = await http.get(`/${fileId}/export`, {
             responseType: 'blob'
+        })
+        return res.data
+    },
+
+    /**
+     * 导出含注释的 PDF（原生 PDF 文档，注释非破坏烘焙回原 PDF）
+     * POST /api/ofd/{fileId}/export-pdf
+     * payload 携带当前页面布局（支持重排/删除/插入/复制页）与注释；省略则按原序导出。
+     */
+    exportPdfWithAnnotations: async (
+        fileId: string,
+        payload?: {
+            pages: { sourceIndex: number | null; widthMm: number; heightMm: number }[]
+            annotations: Record<number, any[]>
+        },
+    ): Promise<Blob> => {
+        const res = await http.post(`/${fileId}/export-pdf`, payload ?? {}, {
+            responseType: 'blob',
+            timeout: 300_000,
+            headers: { 'Content-Type': 'application/json' },
         })
         return res.data
     },

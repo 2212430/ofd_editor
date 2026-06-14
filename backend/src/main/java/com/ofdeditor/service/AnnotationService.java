@@ -21,10 +21,23 @@ public class AnnotationService {
     private final Map<String, Map<Integer, List<AnnotationDTO>>> cache =
             new ConcurrentHashMap<>();
 
+    /** 标记为原生 PDF 的 fileId：注释只存缓存，导出时由 PdfNativeService 烘焙，不写回 OFD */
+    private final Set<String> pdfFileIds = ConcurrentHashMap.newKeySet();
+
     private final OfdRebuildService ofdRebuildService;
 
     public AnnotationService(OfdRebuildService ofdRebuildService) {
         this.ofdRebuildService = ofdRebuildService;
+    }
+
+    /** 标记某文件为原生 PDF，跳过 OFD 写回逻辑 */
+    public void markPdf(String fileId) {
+        pdfFileIds.add(fileId);
+        cache.computeIfAbsent(fileId, k -> new ConcurrentHashMap<>());
+    }
+
+    public boolean isPdf(String fileId) {
+        return pdfFileIds.contains(fileId);
     }
 
     // ==================== 查询 ====================
@@ -69,12 +82,14 @@ public class AnnotationService {
                 .computeIfAbsent(annotation.getPageIndex(), k -> new ArrayList<>())
                 .add(annotation);
 
-        // 3. 写回 OFD Annotation 层
-        try {
-            ofdRebuildService.writeAnnotationToOfd(fileId, annotation);
-        } catch (Exception e) {
-            // 写回失败不影响缓存，记录日志即可
-            System.err.println("[AnnotationService] 写回OFD失败: " + e.getMessage());
+        // 3. 写回 OFD Annotation 层（原生 PDF 跳过，导出时统一烘焙）
+        if (!isPdf(fileId)) {
+            try {
+                ofdRebuildService.writeAnnotationToOfd(fileId, annotation);
+            } catch (Exception e) {
+                // 写回失败不影响缓存，记录日志即可
+                System.err.println("[AnnotationService] 写回OFD失败: " + e.getMessage());
+            }
         }
 
         return annotation;
@@ -111,11 +126,13 @@ public class AnnotationService {
                     AnnotationDTO merged = mergeAnnotation(existing, updated, annotationId);
                     list.set(i, merged);
 
-                    // 写回 OFD
-                    try {
-                        ofdRebuildService.updateAnnotationInOfd(fileId, existing, merged);
-                    } catch (Exception e) {
-                        System.err.println("[AnnotationService] 更新OFD注释失败: " + e.getMessage());
+                    // 写回 OFD（原生 PDF 跳过）
+                    if (!isPdf(fileId)) {
+                        try {
+                            ofdRebuildService.updateAnnotationInOfd(fileId, existing, merged);
+                        } catch (Exception e) {
+                            System.err.println("[AnnotationService] 更新OFD注释失败: " + e.getMessage());
+                        }
                     }
 
                     return merged;
@@ -154,11 +171,13 @@ public class AnnotationService {
             throw new NoSuchElementException("注释不存在: " + annotationId);
         }
 
-        // 从 OFD 移除
-        try {
-            ofdRebuildService.removeAnnotationFromOfd(fileId, annotationId);
-        } catch (Exception e) {
-            System.err.println("[AnnotationService] 从OFD删除注释失败: " + e.getMessage());
+        // 从 OFD 移除（原生 PDF 跳过）
+        if (!isPdf(fileId)) {
+            try {
+                ofdRebuildService.removeAnnotationFromOfd(fileId, annotationId);
+            } catch (Exception e) {
+                System.err.println("[AnnotationService] 从OFD删除注释失败: " + e.getMessage());
+            }
         }
     }
 
@@ -171,10 +190,12 @@ public class AnnotationService {
             pageMap.remove(pageIndex);
         }
 
-        try {
-            ofdRebuildService.removeAllAnnotationsFromOfd(fileId, pageIndex);
-        } catch (Exception e) {
-            System.err.println("[AnnotationService] 从OFD批量删除注释失败: " + e.getMessage());
+        if (!isPdf(fileId)) {
+            try {
+                ofdRebuildService.removeAllAnnotationsFromOfd(fileId, pageIndex);
+            } catch (Exception e) {
+                System.err.println("[AnnotationService] 从OFD批量删除注释失败: " + e.getMessage());
+            }
         }
     }
 
@@ -185,6 +206,7 @@ public class AnnotationService {
      */
     public void clearCache(String fileId) {
         cache.remove(fileId);
+        pdfFileIds.remove(fileId);
     }
 
     /**

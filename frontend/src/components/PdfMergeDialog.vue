@@ -82,6 +82,7 @@ import { ElMessage } from 'element-plus'
 import { Close, Document, Files, FolderOpened } from '@element-plus/icons-vue'
 import { useEditorStore } from '@/stores/editorStore'
 import { buildMergedPdfFilename, ofdApi, downloadBlob } from '@/api/ofdApi'
+import { openNativePdf } from '@/utils/openPdf'
 
 const MAX_FILES = 2
 
@@ -161,19 +162,12 @@ async function handleMerge() {
 
     downloadBlob(pdfBlob, pdfFilename)
 
-    store.setLoading(true, '正在导入编辑器（PDF→OFD）…')
+    store.setLoading(true, '正在导入编辑器（原生 PDF）…')
     const pdfFile = new File([pdfBlob], pdfFilename, { type: 'application/pdf' })
-    const ofdBlob = await ofdApi.fromPdf(pdfFile)
-    const ofdName = pdfFilename.replace(/\.pdf$/i, '.ofd')
-    const ofdFile = new File([ofdBlob], ofdName, { type: 'application/ofd' })
-    const doc = await ofdApi.parseOfd(ofdFile)
-    store.setDocument(doc)
-    store.setCurrentFile(ofdFile, 'pdf')
-    await store.loadAllAnnotations()
+    await openNativePdf(pdfFile)
 
     ElMessage.success(
-        `已下载合并 PDF，并在编辑器中打开（共 ${doc.pageCount} 页）。` +
-        '编辑区为 OFD 预览；需要原生 PDF 请使用刚下载的文件。',
+        `已下载合并 PDF，并在编辑器中原生打开（共 ${store.document?.pageCount ?? 0} 页），可直接批注。`,
     )
     visible.value = false
   } catch (err: any) {

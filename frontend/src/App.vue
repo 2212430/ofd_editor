@@ -116,6 +116,7 @@ import { ElMessage } from 'element-plus'
 import { Upload } from '@element-plus/icons-vue'
 import { useEditorStore } from '@/stores/editorStore'
 import { ofdApi, downloadBlob } from '@/api/ofdApi'
+import { openNativePdf } from '@/utils/openPdf'
 import {
   buildCurrentPagePngFilename, dataUrlToBlob, EXPORT_PAGE_PIXEL_RATIO,
 } from '@/utils/exportPageImage'
@@ -239,6 +240,7 @@ async function handleExportCurrentPageImage() {
 onMounted(() => {
   store.registerEditorAreaResolver(() => editorAreaRef.value ?? null)
   store.registerExportCurrentPageImageHook(handleExportCurrentPageImage)
+  window.addEventListener('keydown', handleGlobalKeydown)
 
   store.registerThumbnailCaptureHook(async (pageIndex: number) => {
     const doc = store.document
@@ -262,6 +264,7 @@ onMounted(() => {
 onUnmounted(() => {
   store.registerExportCurrentPageImageHook(null)
   store.registerThumbnailCaptureHook(null)
+  window.removeEventListener('keydown', handleGlobalKeydown)
 })
 
 function triggerUpload() {
@@ -269,6 +272,42 @@ function triggerUpload() {
 }
 function triggerPdf() {
   pdfRef.value?.click()
+}
+
+function isEditableTarget(el: EventTarget | null): boolean {
+  if (!(el instanceof HTMLElement)) return false
+  const tag = el.tagName
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true
+  if (el.isContentEditable) return true
+  return !!el.closest('.el-input, .el-textarea, [contenteditable="true"]')
+}
+
+function handleGlobalKeydown(e: KeyboardEvent) {
+  if (!store.document) return
+  if (isEditableTarget(e.target)) return
+
+  const mod = e.ctrlKey || e.metaKey
+  if (!mod) return
+
+  if (e.key === 'z' || e.key === 'Z') {
+    if (e.shiftKey) {
+      if (store.canRedo) {
+        e.preventDefault()
+        void store.redo()
+      }
+    } else if (store.canUndo) {
+      e.preventDefault()
+      void store.undo()
+    }
+    return
+  }
+
+  if (e.key === 'y' || e.key === 'Y') {
+    if (store.canRedo) {
+      e.preventDefault()
+      void store.redo()
+    }
+  }
 }
 
 async function handleWelcomeUpload(e: Event) {
@@ -350,17 +389,12 @@ async function handlePrint(opts: PrintOptions) {
 async function handleWelcomePdf(e: Event) {
   const file = (e.target as HTMLInputElement).files?.[0]
   if (!file) return
-  store.setLoading(true, '正在转换PDF...')
+  store.setLoading(true, '正在打开PDF...')
   try {
-    const blob = await ofdApi.fromPdf(file)
-    const ofdFile = new File([blob], file.name.replace(/\.pdf$/i, '.ofd'))
-    const doc = await ofdApi.parseOfd(ofdFile)
-    store.setDocument(doc)
-    store.setCurrentFile(ofdFile, 'pdf')
-    await store.loadAllAnnotations()
-    ElMessage.success('PDF 转换成功！')
+    await openNativePdf(file)
+    ElMessage.success('PDF 已打开（原生渲染，可批注）')
   } catch (err: any) {
-    ElMessage.error(err.message || 'PDF转换失败')
+    ElMessage.error(err.message || 'PDF打开失败')
   } finally {
     store.setLoading(false)
     ;(e.target as HTMLInputElement).value = ''

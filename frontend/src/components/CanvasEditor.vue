@@ -24,6 +24,12 @@
       <v-layer>
         <v-rect :config="bgConfig" />
 
+        <!-- 原生 PDF 背景：PDF.js 渲染的页面位图（矢量保真，随缩放重渲染） -->
+        <v-image
+            v-if="store.isPdfDocument && pdfBgCanvas"
+            :config="pdfBgConfig"
+        />
+
         <template v-for="element in page.elements" :key="element.id">
           <v-group
               v-if="element.type === 'TEXT' && isCurrencySplitText(element)"
@@ -241,11 +247,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onUnmounted, reactive, ref, watch, withDefaults } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch, withDefaults } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useEditorStore } from '@/stores/editorStore'
 import type { PageData, ElementData, AnnotationData } from '@/types'
 import { konvaStageRotationConfig, normalizeViewRotation } from '@/utils/viewRotation'
+import { renderPdfPage } from '@/utils/pdfRender'
 
 // ─────────────────────────────────────────────
 // Props / Store
@@ -380,6 +387,80 @@ const bgConfig = computed(() => ({
   fill:   'white',
   name:   'page-bg',
 }))
+
+// ─────────────────────────────────────────────
+// 原生 PDF 背景（PDF.js）
+// ─────────────────────────────────────────────
+const pdfBgCanvas = ref<HTMLCanvasElement | null>(null)
+let pdfRenderTimer: ReturnType<typeof setTimeout> | null = null
+let pdfRenderSeq = 0
+
+const pdfBgConfig = computed(() => ({
+  x: 0, y: 0,
+  width:  canvasWidth.value,
+  height: canvasHeight.value,
+  image:  pdfBgCanvas.value as any,
+  listening: false,
+}))
+
+/** PDF 原始页号：随页面重排/复制而携带；插入的空白页为 null（渲染白页） */
+const pdfSourceIndex = computed(() => {
+  const s = props.page.sourcePageIndex
+  return s == null ? -1 : s
+})
+
+async function renderPdfBackground() {
+  if (!store.isPdfDocument || !store.fileId) return
+  const seq = ++pdfRenderSeq
+  // 空白页（插入页）没有原始页，渲染白底
+  if (pdfSourceIndex.value < 0) {
+    pdfBgCanvas.value = null
+    await nextTick()
+    stageRef.value?.getNode?.()?.batchDraw?.()
+    return
+  }
+  // 离屏缩略图用低过采样提速；主视图按 dpr（封顶 2）保证清晰
+  const oversample = props.offscreen
+      ? 1
+      : Math.min(typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1, 2)
+  try {
+    const canvas = await renderPdfPage(store.fileId, pdfSourceIndex.value, renderScale.value, oversample)
+    if (seq !== pdfRenderSeq) return // 已有更新的渲染请求
+    if (canvas) {
+      pdfBgCanvas.value = canvas
+      await nextTick()
+      stageRef.value?.getNode?.()?.batchDraw?.()
+    }
+  } catch (e) {
+    console.warn('[CanvasEditor] PDF 背景渲染失败 source=' + pdfSourceIndex.value, e)
+  }
+}
+
+function schedulePdfRender(delay = 160) {
+  if (pdfRenderTimer) clearTimeout(pdfRenderTimer)
+  pdfRenderTimer = setTimeout(() => {
+    pdfRenderTimer = null
+    void renderPdfBackground()
+  }, delay)
+}
+
+// 文档/页面（含重排后原始页变化）/缩放变化时刷新 PDF 背景
+watch(
+    () => [store.isPdfDocument, store.fileId, props.pageIndex, props.page.id, props.page.sourcePageIndex] as const,
+    () => {
+      pdfBgCanvas.value = null
+      if (store.isPdfDocument) void renderPdfBackground()
+    },
+    { immediate: true },
+)
+
+watch(renderScale, () => {
+  if (store.isPdfDocument) schedulePdfRender()
+})
+
+onMounted(() => {
+  if (store.isPdfDocument) void renderPdfBackground()
+})
 
 const transformerConfig = {
   rotateEnabled: true,
@@ -776,6 +857,7 @@ function onPanEnd() {
 onUnmounted(() => {
   window.removeEventListener('mousemove', onPanMove)
   window.removeEventListener('mouseup', onPanEnd)
+  if (pdfRenderTimer) clearTimeout(pdfRenderTimer)
 })
 
 // ─────────────────────────────────────────────
@@ -1785,6 +1867,8 @@ function getStampConfig(ann: AnnotationData) {
 // ─────────────────────────────────────────────
 /** 当前页所需的位图（OFD 图像 + 图章）是否都已加载完成 */
 function allImagesReady(): boolean {
+  // 原生 PDF 非空白页需等待背景渲染完成（空白页无需背景）
+  if (store.isPdfDocument && props.page.sourcePageIndex != null && !pdfBgCanvas.value) return false
   for (const el of props.page.elements) {
     if (el.type === 'IMAGE' || el.type === 'SEAL') {
       const src = getImageSrc(el)
