@@ -2,9 +2,15 @@ import { defineStore, acceptHMRUpdate } from 'pinia'
 import { ref, computed, reactive, nextTick } from 'vue'
 import type {
     DocumentData, ElementData, PageData,
-    AnnotationData, AnnotationType, ToolType, DocumentSource, PageViewMode
+    AnnotationData, AnnotationType, ToolType, DocumentSource, PageViewMode, WatermarkConfig,
 } from '@/types'
 import { ofdApi } from '@/api/ofdApi'
+import { getPdfPageTextItems, type PageTextItem } from '@/utils/pdfRender'
+import {
+    normalizePageRotate,
+    rotateAnnotationInPage,
+    rotateElementInPage,
+} from '@/utils/pageRotate'
 import { effectivePageSizeMm, normalizeViewRotation } from '@/utils/viewRotation'
 import {
     getElementImageSrc,
@@ -50,6 +56,161 @@ export const useEditorStore = defineStore('editor', () => {
      * 兜底 vue-konva deep watcher 在 ref 整体替换 + 多页文本场景下偶尔漏发的 setAttrs。
      */
     const renderVersion = ref(0)
+
+    // ==================== 全文搜索 / 文本选择 ====================
+    /** 单个命中：所在页 + 一组高亮矩形（mm，可视页坐标，左上原点） */
+    interface SearchRect { x: number; y: number; w: number; h: number }
+    interface SearchMatch { pageIndex: number; rects: SearchRect[]; snippet: string }
+
+    const searchVisible = ref(false)
+    const searchQuery = ref('')
+    const searchMatches = ref<SearchMatch[]>([])
+    const searchActiveIndex = ref(-1)
+    const searching = ref(false)
+    /** 文本选择模式：开启后画布上叠加可选中文本层（关闭批注/元素交互） */
+    const textSelectMode = ref(false)
+
+    /** 全局文本水印（保存/导出时烘焙） */
+    const watermarkConfig = ref<WatermarkConfig | null>(null)
+
+    // 每页文本项缓存（OFD 从已解析元素取，PDF 从 PDF.js 取）
+    const pageTextItemsCache = new Map<string, PageTextItem[]>()
+
+    function textCacheKey(pageIndex: number) {
+        return `${documentKind.value}:${fileId.value ?? 'nofile'}:${pageIndex}`
+    }
+
+    /** 取某页的文本项（统一 mm，左上原点，未叠加视图旋转） */
+    async function getPageTextItems(pageIndex: number): Promise<PageTextItem[]> {
+        const key = textCacheKey(pageIndex)
+        const cached = pageTextItemsCache.get(key)
+        if (cached) return cached
+
+        let items: PageTextItem[] = []
+        if (documentKind.value === 'pdf') {
+            if (fileId.value) {
+                try {
+                    items = await getPdfPageTextItems(fileId.value, pageIndex)
+                } catch (e) {
+                    console.warn('[editorStore] 取PDF文本失败:', e)
+                }
+            }
+        } else {
+            const page = document.value?.pages[pageIndex]
+            if (page) {
+                items = page.elements
+                    .filter((el) => el.type === 'TEXT' && !el.isDeleted && (el.content ?? '').length > 0)
+                    .map((el) => ({
+                        str: el.content ?? '',
+                        xMm: el.x,
+                        yMm: el.y,
+                        wMm: el.width,
+                        hMm: el.height,
+                    }))
+            }
+        }
+        pageTextItemsCache.set(key, items)
+        return items
+    }
+
+    function clearTextItemsCache() {
+        pageTextItemsCache.clear()
+    }
+
+    const searchMatchesByPage = computed(() => {
+        const map: Record<number, { match: SearchMatch; index: number }[]> = {}
+        searchMatches.value.forEach((match, index) => {
+            ;(map[match.pageIndex] ??= []).push({ match, index })
+        })
+        return map
+    })
+
+    function openSearch() {
+        searchVisible.value = true
+    }
+
+    function closeSearch() {
+        searchVisible.value = false
+        searchQuery.value = ''
+        searchMatches.value = []
+        searchActiveIndex.value = -1
+    }
+
+    function toggleTextSelectMode(on?: boolean) {
+        textSelectMode.value = on ?? !textSelectMode.value
+    }
+
+    /** 在某行字符串内查找全部匹配，按字符比例换算子矩形 */
+    function matchRectsInItem(item: PageTextItem, query: string, lowerQuery: string): SearchRect[] {
+        const rects: SearchRect[] = []
+        const lower = item.str.toLowerCase()
+        const len = item.str.length
+        if (len === 0) return rects
+        let from = 0
+        while (true) {
+            const idx = lower.indexOf(lowerQuery, from)
+            if (idx < 0) break
+            const x = item.xMm + (idx / len) * item.wMm
+            const w = (query.length / len) * item.wMm
+            rects.push({ x, y: item.yMm, w, h: item.hMm })
+            from = idx + Math.max(1, query.length)
+        }
+        return rects
+    }
+
+    async function runSearch(query: string) {
+        searchQuery.value = query
+        const q = query.trim()
+        searchMatches.value = []
+        searchActiveIndex.value = -1
+        if (!q || !document.value) return
+
+        searching.value = true
+        try {
+            const lowerQ = q.toLowerCase()
+            const matches: SearchMatch[] = []
+            const pageCount = document.value.pageCount
+            for (let pi = 0; pi < pageCount; pi++) {
+                const items = await getPageTextItems(pi)
+                for (const item of items) {
+                    const rects = matchRectsInItem(item, q, lowerQ)
+                    for (const r of rects) {
+                        matches.push({ pageIndex: pi, rects: [r], snippet: item.str })
+                    }
+                }
+            }
+            searchMatches.value = matches
+            if (matches.length > 0) {
+                searchActiveIndex.value = 0
+                jumpToMatch(0)
+            }
+        } finally {
+            searching.value = false
+        }
+    }
+
+    function jumpToMatch(i: number) {
+        const m = searchMatches.value[i]
+        if (!m) return
+        searchActiveIndex.value = i
+        if (m.pageIndex !== currentPageIndex.value) {
+            setCurrentPage(m.pageIndex, { preserveSelection: true, scrollIntoView: true })
+        } else {
+            scrollToPageInViewHook?.(m.pageIndex)
+        }
+        renderVersion.value++
+    }
+
+    function nextMatch() {
+        if (searchMatches.value.length === 0) return
+        jumpToMatch((searchActiveIndex.value + 1) % searchMatches.value.length)
+    }
+
+    function prevMatch() {
+        if (searchMatches.value.length === 0) return
+        const n = searchMatches.value.length
+        jumpToMatch((searchActiveIndex.value - 1 + n) % n)
+    }
 
     // ==================== 注释相关状态 ====================
     const currentTool = ref<ToolType>('SELECT')
@@ -329,6 +490,11 @@ export const useEditorStore = defineStore('editor', () => {
         rightPanelTab.value = 'properties'
         annotationListScope.value = 'current'
         clearPageThumbnails()
+        clearTextItemsCache()
+        watermarkConfig.value = null
+        searchMatches.value = []
+        searchActiveIndex.value = -1
+        searchQuery.value = ''
         viewRotation.value = 0
         resetHistory()
         void nextTick(() => { fitToWidth() })
@@ -567,6 +733,46 @@ export const useEditorStore = defineStore('editor', () => {
         viewRotation.value = 0
     }
 
+    function setWatermarkConfig(wm: WatermarkConfig | null) {
+        watermarkConfig.value = wm
+    }
+
+    /** 持久旋转当前页 90°（写入 pageRotate；OFD 同步变换元素/批注坐标） */
+    function rotateCurrentPagePersist(clockwise = true) {
+        if (!document.value) return false
+        const idx = currentPageIndex.value
+        const page = document.value.pages[idx]
+        if (!page) return false
+
+        const delta = clockwise ? 90 : -90
+        page.pageRotate = normalizePageRotate((page.pageRotate ?? 0) + delta)
+
+        if (documentKind.value === 'ofd') {
+            let pw = page.width
+            let ph = page.height
+            for (const el of page.elements) {
+                if (el.isDeleted) continue
+                const r = rotateElementInPage(el, pw, ph, clockwise)
+                pw = r.pageW
+                ph = r.pageH
+            }
+            for (const ann of annotationsMap[idx] ?? []) {
+                const r = rotateAnnotationInPage(ann, pw, ph, clockwise)
+                pw = r.pageW
+                ph = r.pageH
+            }
+            page.width = pw
+            page.height = ph
+        } else {
+            // PDF：仅记录 pageRotate，展示与导出分别由 Canvas /export-pdf 处理
+        }
+
+        saveToHistory()
+        renderVersion.value++
+        schedulePageThumbnailRefresh(idx)
+        return true
+    }
+
     /** 与 App.vue `.editor-area` 的四边 padding 之和（各 24px，取宽/高方向合计 48） */
     const EDITOR_AREA_PADDING = 48
 
@@ -710,6 +916,7 @@ export const useEditorStore = defineStore('editor', () => {
         if (changes.fontSize !== undefined) next.fontSizeOverridden = true
 
         Object.assign(element, next)
+        clearTextItemsCache()
         saveToHistory()
         schedulePageThumbnailRefresh(pageIndex)
     }
@@ -762,6 +969,7 @@ export const useEditorStore = defineStore('editor', () => {
             element.isDirty = true
         }
         if (selectedElementId.value === elementId) selectedElementId.value = null
+        clearTextItemsCache()
         saveToHistory()
         schedulePageThumbnailRefresh(pageIndex)
         return true
@@ -1078,15 +1286,19 @@ export const useEditorStore = defineStore('editor', () => {
 
     function getDocumentForSave(): DocumentData | null {
         if (!document.value) return null
-        // 深拷贝页面/元素，确保 imageBase64、imageContentDirty 等字段完整进入保存 JSON
-        const pages = document.value.pages.map((page) => ({
-            ...page,
-            elements: page.elements.map((el) => ({ ...el })),
-        }))
+        const pages = document.value.pages.map((page) => {
+            const { pageRotate, ...rest } = page
+            return {
+                ...rest,
+                rotate: pageRotate,
+                elements: page.elements.map((el) => ({ ...el })),
+            }
+        })
         return {
             ...document.value,
             pages,
             fileId: fileId.value ?? undefined,
+            watermark: watermarkConfig.value ?? undefined,
         }
     }
 
@@ -1291,12 +1503,13 @@ export const useEditorStore = defineStore('editor', () => {
         return annotationsMap[pageIndex] ?? []
     }
 
-    /** 构造原生 PDF 导出负载：当前页序（含原始页号/空白页）+ 各页注释 */
+    /** 构造原生 PDF 导出负载：当前页序（含原始页号/空白页/旋转）+ 各页注释 + 水印 */
     function buildPdfExportPayload() {
         const pages = (document.value?.pages ?? []).map((p) => ({
             sourceIndex: p.sourcePageIndex ?? null,
             widthMm: p.width,
             heightMm: p.height,
+            rotate: p.pageRotate ? normalizePageRotate(p.pageRotate) : undefined,
         }))
         const annotations: Record<number, any[]> = {}
         ;(document.value?.pages ?? []).forEach((_, idx) => {
@@ -1308,7 +1521,25 @@ export const useEditorStore = defineStore('editor', () => {
                 return o
             })
         })
-        return { pages, annotations }
+        const wm = watermarkConfig.value
+        return {
+            pages,
+            annotations,
+            watermark: wm?.text ? wm : undefined,
+        }
+    }
+
+    /** 从当前文档状态提取指定页（1 基，当前顺序），返回新文件 blob */
+    async function extractPagesAsBlob(pages1Based: number[]): Promise<Blob> {
+        if (!document.value) throw new Error('无打开文档')
+        let blob: Blob
+        if (documentKind.value === 'pdf') {
+            if (!fileId.value) throw new Error('文件会话已失效')
+            blob = await ofdApi.exportPdfWithAnnotations(fileId.value, buildPdfExportPayload())
+            return ofdApi.extractPdf(blob, pages1Based)
+        }
+        blob = await ofdApi.saveOfd(getDocumentForSave()!)
+        return ofdApi.extractOfd(blob, pages1Based)
     }
 
     async function exportWithAnnotations(filename?: string): Promise<void> {
@@ -1342,6 +1573,11 @@ export const useEditorStore = defineStore('editor', () => {
         history, historyIndex, fileId, renderVersion,
         printDialogVisible,
         imageCropDialogVisible,
+        // ── 搜索 / 文本选择 ──
+        searchVisible, searchQuery, searchMatches, searchActiveIndex, searching,
+        textSelectMode, searchMatchesByPage,
+        openSearch, closeSearch, runSearch, nextMatch, prevMatch, jumpToMatch,
+        toggleTextSelectMode, getPageTextItems,
         // ── 注释状态 ──
         currentTool, annotationsMap, selectedAnnotationId,
         rightPanelTab, annotationListScope, filteredAnnotationList, annotationCount,
@@ -1359,6 +1595,9 @@ export const useEditorStore = defineStore('editor', () => {
         registerExportCurrentPageImageHook, exportCurrentPageImage,
         selectElement, setScale, fitToWidth, fitToPage,
         rotateViewClockwise, rotateViewCounterClockwise, resetViewRotation,
+        rotateCurrentPagePersist,
+        setWatermarkConfig, watermarkConfig,
+        extractPagesAsBlob,
         registerEditorAreaResolver, setLoading,
         updateElement, resetElement, deleteElement, deleteSelectedElement,
         importImageToPage, applyImageCrop,

@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { DocumentData, AnnotationData } from '@/types'
+import type { DocumentData, AnnotationData, SignatureVerifyResult } from '@/types'
 import { unpackSplitPayload, type SplitPackedFile } from '@/utils/splitPayload'
 
 // axios实例（常规接口 60s；大文件转换在单次请求里单独加长 timeout）
@@ -244,6 +244,45 @@ export const ofdApi = {
         return res.data
     },
 
+    // ==================== 电子签章 / 验签 ====================
+
+    /** 验证 OFD 的电子签章 / 数字签名 */
+    verifySignature: async (file: Blob): Promise<SignatureVerifyResult> => {
+        const form = new FormData()
+        form.append('file', file, 'doc.ofd')
+        const res = await http.post<SignatureVerifyResult>('/verify-signature', form, {
+            timeout: 120_000,
+        })
+        return res.data
+    },
+
+    /** 给 OFD 加盖国密电子签章，返回签章后的 OFD blob */
+    signGm: async (params: {
+        file: Blob
+        sealImage?: File | null
+        name?: string
+        page?: number
+        x?: number
+        y?: number
+        width?: number
+        height?: number
+    }): Promise<Blob> => {
+        const form = new FormData()
+        form.append('file', params.file, 'doc.ofd')
+        if (params.sealImage) form.append('sealImage', params.sealImage)
+        if (params.name) form.append('name', params.name)
+        if (params.page != null) form.append('page', String(params.page))
+        if (params.x != null) form.append('x', String(params.x))
+        if (params.y != null) form.append('y', String(params.y))
+        if (params.width != null) form.append('width', String(params.width))
+        if (params.height != null) form.append('height', String(params.height))
+        const res = await http.post('/sign-gm', form, {
+            responseType: 'blob',
+            timeout: 180_000,
+        })
+        return ensureBlobOk(res.data, res.headers['content-type'])
+    },
+
     // ==================== 注释相关接口 ====================
 
     /**
@@ -377,8 +416,9 @@ export const ofdApi = {
     exportPdfWithAnnotations: async (
         fileId: string,
         payload?: {
-            pages: { sourceIndex: number | null; widthMm: number; heightMm: number }[]
+            pages: { sourceIndex: number | null; widthMm: number; heightMm: number; rotate?: number }[]
             annotations: Record<number, any[]>
+            watermark?: WatermarkOptions
         },
     ): Promise<Blob> => {
         const res = await http.post(`/${fileId}/export-pdf`, payload ?? {}, {
@@ -388,6 +428,60 @@ export const ofdApi = {
         })
         return res.data
     },
+
+    // ==================== 水印 / 页面提取 ====================
+
+    /** 给 OFD 全部页面加文本水印，返回水印后的 OFD blob */
+    watermarkOfd: async (file: Blob, wm: WatermarkOptions): Promise<Blob> => {
+        const form = new FormData()
+        form.append('file', file, 'doc.ofd')
+        form.append('text', wm.text)
+        if (wm.fontSize != null) form.append('fontSize', String(wm.fontSize))
+        if (wm.color) form.append('color', wm.color)
+        if (wm.opacity != null) form.append('opacity', String(wm.opacity))
+        if (wm.angle != null) form.append('angle', String(wm.angle))
+        if (wm.bold != null) form.append('bold', String(wm.bold))
+        const res = await http.post('/watermark-ofd', form, {
+            responseType: 'blob',
+            timeout: 300_000,
+        })
+        return ensureBlobOk(res.data, res.headers['content-type'])
+    },
+
+    /** 从 OFD 提取指定页（1 基，顺序即输出顺序），返回新 OFD blob */
+    extractOfd: async (file: Blob, pages: number[]): Promise<Blob> => {
+        const form = new FormData()
+        form.append('file', file, 'doc.ofd')
+        form.append('pages', pages.join(','))
+        const res = await http.post('/extract-ofd', form, {
+            responseType: 'blob',
+            timeout: 300_000,
+        })
+        return ensureBlobOk(res.data, res.headers['content-type'])
+    },
+
+    /** 从 PDF 提取指定页（1 基，顺序即输出顺序），返回新 PDF blob */
+    extractPdf: async (file: Blob, pages: number[]): Promise<Blob> => {
+        const form = new FormData()
+        form.append('file', file, 'doc.pdf')
+        form.append('pages', pages.join(','))
+        const res = await http.post('/extract-pdf', form, {
+            responseType: 'blob',
+            timeout: 300_000,
+        })
+        return ensureBlobOk(res.data, res.headers['content-type'])
+    },
+}
+
+/** 文本水印参数（前端） */
+export interface WatermarkOptions {
+    text: string
+    fontSize?: number
+    color?: string
+    opacity?: number
+    angle?: number
+    tile?: boolean
+    bold?: boolean
 }
 
 /** 直接触发浏览器下载（不再弹出确认框） */

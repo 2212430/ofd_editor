@@ -10,4 +10,6 @@ public class OfdDocumentDTO {
     private Integer pageCount;
     private List<PageDTO> pages;
     private String fileId;
+    /** 保存时可选全局文本水印 */
+    private WatermarkDTO watermark;
 }

@@ -10,6 +10,9 @@
 
       <!-- 中间编辑区 -->
       <div ref="editorAreaRef" class="editor-area">
+        <!-- 全文搜索浮层 -->
+        <SearchBar />
+
         <!-- 加载遮罩 -->
         <div v-if="store.isLoading" class="loading-mask">
           <div class="spinner"></div>
@@ -77,6 +80,14 @@
             <span class="status-sep">|</span>
             <span>视图旋转 {{ normalizeViewRotation(store.viewRotation) }}°</span>
           </template>
+          <template v-if="store.currentPage?.pageRotate">
+            <span class="status-sep">|</span>
+            <span>页旋转 {{ normalizeViewRotation(store.currentPage.pageRotate) }}°</span>
+          </template>
+          <template v-if="store.watermarkConfig">
+            <span class="status-sep">|</span>
+            <span>水印：{{ store.watermarkConfig.text }}</span>
+          </template>
         </template>
         <span v-else>就绪</span>
       </div>
@@ -126,6 +137,7 @@ import CanvasEditor from '@/components/CanvasEditor.vue'
 import ContinuousPageView from '@/components/ContinuousPageView.vue'
 import RightSidePanel from '@/components/RightSidePanel.vue'
 import PrintDialog from '@/components/PrintDialog.vue'
+import SearchBar from '@/components/SearchBar.vue'
 import {
   buildPrintWindow, resolvePageIndices, qualityToPixelRatio,
   type PrintOptions, type CapturedPage,
@@ -158,7 +170,7 @@ const singleCanvasFrameStyle = computed(() => {
       page.width,
       page.height,
       store.scale,
-      store.viewRotation,
+      normalizeViewRotation((page.pageRotate ?? 0) + store.viewRotation),
   )
   return {
     width: `${stageWidth}px`,
@@ -299,6 +311,13 @@ function handleGlobalKeydown(e: KeyboardEvent) {
 
   const mod = e.ctrlKey || e.metaKey
   if (!mod) return
+
+  // Ctrl/Cmd + F：打开全文搜索
+  if (e.key === 'f' || e.key === 'F') {
+    e.preventDefault()
+    store.openSearch()
+    return
+  }
 
   if (e.key === 'z' || e.key === 'Z') {
     if (e.shiftKey) {

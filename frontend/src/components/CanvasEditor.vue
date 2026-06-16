@@ -222,7 +222,36 @@
             :config="previewStrikeoutConfig"
         />
       </v-layer>
+
+      <!-- ============================================================
+           Layer：全文搜索高亮（命中矩形，随舞台旋转，不拦截事件）
+           ============================================================ -->
+      <v-layer v-if="searchHighlightConfigs.length > 0" :listening="false">
+        <template v-for="hl in searchHighlightConfigs" :key="'sh-' + hl.index">
+          <v-rect
+              v-for="(rc, ri) in hl.rects"
+              :key="'sh-' + hl.index + '-' + ri"
+              :config="rc"
+          />
+        </template>
+      </v-layer>
     </v-stage>
+
+    <!-- ============================================================
+         文本选择层：透明可选中文本（仅视图未旋转、文本选择模式开启时）
+         ============================================================ -->
+    <div
+        v-if="showTextLayer"
+        class="text-select-layer"
+        :style="textLayerStyle"
+    >
+      <span
+          v-for="(it, i) in textLayerItems"
+          :key="'tx-' + i"
+          class="text-select-span"
+          :style="textSpanStyle(it)"
+      >{{ it.str }}</span>
+    </div>
 
     <!-- 文本注释编辑弹窗 -->
     <el-dialog
@@ -252,7 +281,7 @@ import { ElMessage } from 'element-plus'
 import { useEditorStore } from '@/stores/editorStore'
 import type { PageData, ElementData, AnnotationData } from '@/types'
 import { konvaStageRotationConfig, normalizeViewRotation } from '@/utils/viewRotation'
-import { renderPdfPage } from '@/utils/pdfRender'
+import { renderPdfPage, type PageTextItem } from '@/utils/pdfRender'
 
 // ─────────────────────────────────────────────
 // Props / Store
@@ -274,6 +303,73 @@ const renderScale = computed(() => props.fixedScale ?? store.scale)
 
 // 渲染时过滤掉被标记删除的元素（保存时再由后端移除原 OFD 节点）
 const visibleElements = computed(() => props.page.elements.filter((el) => !el.isDeleted))
+
+// ─────────────────────────────────────────────
+// 全文搜索高亮（命中矩形，stage 坐标，随旋转）
+// ─────────────────────────────────────────────
+const searchHighlightConfigs = computed(() => {
+  if (props.offscreen) return []
+  const list = store.searchMatchesByPage[props.pageIndex] ?? []
+  return list.map(({ match, index }) => ({
+    index,
+    rects: match.rects.map((r) => ({
+      x: r.x * MM_TO_PX * renderScale.value,
+      y: r.y * MM_TO_PX * renderScale.value,
+      width: Math.max(2, r.w * MM_TO_PX * renderScale.value),
+      height: Math.max(2, r.h * MM_TO_PX * renderScale.value),
+      fill: index === store.searchActiveIndex ? 'rgba(255,140,0,0.55)' : 'rgba(255,221,0,0.42)',
+      cornerRadius: 1,
+      listening: false,
+    })),
+  }))
+})
+
+// ─────────────────────────────────────────────
+// 文本选择层（透明可选文本，仅未旋转时）
+// ─────────────────────────────────────────────
+const textLayerItems = ref<PageTextItem[]>([])
+
+const showTextLayer = computed(() =>
+    !props.offscreen
+    && store.textSelectMode
+    && normalizeViewRotation((props.page.pageRotate ?? 0) + store.viewRotation) === 0
+    && textLayerItems.value.length > 0,
+)
+
+const textLayerStyle = computed(() => ({
+  width: `${props.page.width * MM_TO_PX * renderScale.value}px`,
+  height: `${props.page.height * MM_TO_PX * renderScale.value}px`,
+}))
+
+function textSpanStyle(it: PageTextItem) {
+  const sc = MM_TO_PX * renderScale.value
+  const h = Math.max(1, it.hMm * sc)
+  return {
+    left: `${it.xMm * sc}px`,
+    top: `${it.yMm * sc}px`,
+    fontSize: `${h}px`,
+    lineHeight: `${h}px`,
+    height: `${h}px`,
+  }
+}
+
+async function loadTextLayer() {
+  if (props.offscreen || !store.textSelectMode) {
+    textLayerItems.value = []
+    return
+  }
+  try {
+    textLayerItems.value = await store.getPageTextItems(props.pageIndex)
+  } catch {
+    textLayerItems.value = []
+  }
+}
+
+watch(
+    () => [store.textSelectMode, store.fileId, props.pageIndex, props.page.id] as const,
+    () => { void loadTextLayer() },
+    { immediate: true },
+)
 
 // ─────────────────────────────────────────────
 // Konva 引用
@@ -358,7 +454,9 @@ const stageRotation = computed(() =>
         props.page.width,
         props.page.height,
         renderScale.value,
-        props.offscreen ? 0 : store.viewRotation,
+        props.offscreen
+            ? normalizeViewRotation(props.page.pageRotate ?? 0)
+            : normalizeViewRotation((props.page.pageRotate ?? 0) + store.viewRotation),
     ),
 )
 
@@ -820,7 +918,9 @@ function getStagePos(): { x: number; y: number } | null {
   if (!stage) return null
   const pos = stage.getPointerPosition()
   if (!pos) return null
-  const rot = props.offscreen ? 0 : normalizeViewRotation(store.viewRotation)
+  const rot = props.offscreen
+      ? normalizeViewRotation(props.page.pageRotate ?? 0)
+      : normalizeViewRotation((props.page.pageRotate ?? 0) + store.viewRotation)
   if (rot === 0) {
     return { x: px2mm(pos.x), y: px2mm(pos.y) }
   }
@@ -1929,6 +2029,33 @@ defineExpose({ captureForPrint })
 </script>
 
 <style scoped>
+.canvas-wrapper {
+  position: relative;
+}
+
+.text-select-layer {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 5;
+  overflow: hidden;
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+}
+
+.text-select-span {
+  position: absolute;
+  white-space: pre;
+  color: transparent;
+  transform-origin: 0 0;
+  pointer-events: auto;
+}
+
+.text-select-span::selection {
+  background: rgba(26, 115, 232, 0.35);
+}
+
 .canvas-wrapper.cursor-hand {
   cursor: grab;
 }

@@ -3,7 +3,9 @@ package com.ofdeditor.controller;
 import com.ofdeditor.dto.AnnotationDTO;
 import com.ofdeditor.dto.OfdDocumentDTO;
 import com.ofdeditor.dto.PdfExportRequest;
+import com.ofdeditor.dto.SignatureVerifyResult;
 import com.ofdeditor.dto.SplitOfdRequest;
+import com.ofdeditor.dto.WatermarkDTO;
 import com.ofdeditor.service.AnnotationService;
 import com.ofdeditor.service.ConversionService;
 import com.ofdeditor.service.OfdCacheService;
@@ -13,6 +15,8 @@ import com.ofdeditor.service.OfdRebuildService;
 import com.ofdeditor.service.OfdSplitService;
 import com.ofdeditor.service.PdfMergeService;
 import com.ofdeditor.service.PdfNativeService;
+import com.ofdeditor.service.OfdPageService;
+import com.ofdeditor.service.OfdSignatureService;
 import com.ofdeditor.util.SplitPayloadUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -42,6 +46,8 @@ public class OfdController {
     private final OfdRebuildService rebuildService;
     private final OfdCacheService cacheService;
     private final AnnotationService annotationService;
+    private final OfdSignatureService signatureService;
+    private final OfdPageService pageService;
 
     @GetMapping("/health")
     public ResponseEntity<String> health() {
@@ -371,6 +377,11 @@ public class OfdController {
             }
 
             byte[] ofdBytes = rebuildService.rebuildOfd(documentDTO, originalOfd);
+            if (documentDTO.getWatermark() != null
+                    && documentDTO.getWatermark().getText() != null
+                    && !documentDTO.getWatermark().getText().isBlank()) {
+                ofdBytes = pageService.addWatermark(ofdBytes, documentDTO.getWatermark());
+            }
 
             if (documentDTO.getFileId() != null) {
                 cacheService.put(documentDTO.getFileId(), ofdBytes);
@@ -560,7 +571,8 @@ public class OfdController {
             } else {
                 Map<Integer, List<AnnotationDTO>> allAnnotations =
                         annotationService.getAllAnnotations(fileId);
-                pdfBytes = pdfNativeService.bakeAnnotations(originalPdf, allAnnotations);
+                pdfBytes = pdfNativeService.bakeAnnotations(originalPdf, allAnnotations,
+                        request != null ? request.getWatermark() : null);
             }
 
             String filename = URLEncoder.encode("annotated.pdf", StandardCharsets.UTF_8);
@@ -612,6 +624,172 @@ public class OfdController {
             log.error("PDF转OFD失败: {}", e.getMessage(), e);
             return ResponseEntity.internalServerError().body("转换失败: " + e.getMessage());
         }
+    }
+
+    // ==================== 电子签章 / 验签 ====================
+
+    /**
+     * 验证 OFD 内的电子签章 / 数字签名。
+     * POST /api/ofd/verify-signature  (multipart: file)
+     */
+    @PostMapping("/verify-signature")
+    public ResponseEntity<?> verifySignature(@RequestParam("file") MultipartFile file) {
+        try {
+            SignatureVerifyResult result = signatureService.verify(file.getBytes());
+            return ResponseEntity.ok(result);
+        } catch (Exception e) {
+            log.error("验签失败: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body("验签失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 给 OFD 加盖国密电子签章（GM/T 0099 SES v4），非破坏地追加签章。
+     * POST /api/ofd/sign-gm  (multipart: file, sealImage?, name?, page?, x?, y?, width?, height?)
+     */
+    @PostMapping("/sign-gm")
+    public ResponseEntity<?> signGm(
+            @RequestParam("file") MultipartFile file,
+            @RequestParam(value = "sealImage", required = false) MultipartFile sealImage,
+            @RequestParam(value = "name", required = false) String name,
+            @RequestParam(value = "page", defaultValue = "1") int page,
+            @RequestParam(value = "x", defaultValue = "60") double x,
+            @RequestParam(value = "y", defaultValue = "60") double y,
+            @RequestParam(value = "width", defaultValue = "40") double width,
+            @RequestParam(value = "height", defaultValue = "40") double height) {
+        try {
+            byte[] sealPng = (sealImage != null && !sealImage.isEmpty()) ? sealImage.getBytes() : null;
+            byte[] signed = signatureService.signGmSeal(
+                    file.getBytes(), sealPng, name, page, x, y, width, height);
+
+            String filename = URLEncoder.encode("signed.ofd", StandardCharsets.UTF_8);
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_TYPE, "application/ofd")
+                    .header(HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename*=UTF-8''" + filename)
+                    .body(signed);
+        } catch (Exception e) {
+            log.error("加盖国密签章失败: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body("签章失败: " + e.getMessage());
+        }
+    }
+
+    // ==================== 水印 / 页面提取 ====================
+
+    /**
+     * 给上传的 OFD 全部页面加文本水印（复用 ofdrw 烘焙），返回新 OFD。
+     * POST /api/ofd/watermark-ofd (multipart: file, text, fontSize?, color?, opacity?, angle?, bold?)
+     */
+    @PostMapping("/watermark-ofd")
+    public ResponseEntity<?> watermarkOfd(
+            @RequestParam("file") MultipartFile file,
+            @RequestParam("text") String text,
+            @RequestParam(value = "fontSize", required = false) Double fontSize,
+            @RequestParam(value = "color", required = false) String color,
+            @RequestParam(value = "opacity", required = false) Double opacity,
+            @RequestParam(value = "angle", required = false) Double angle,
+            @RequestParam(value = "bold", required = false) Boolean bold) {
+        try {
+            if (file.isEmpty() || !isOfdFilename(file.getOriginalFilename())) {
+                return ResponseEntity.badRequest().body("请上传 OFD 格式文件");
+            }
+            WatermarkDTO wm = buildWatermark(text, fontSize, color, opacity, angle, bold);
+            byte[] result = pageService.addWatermark(file.getBytes(), wm);
+
+            String filename = URLEncoder.encode("watermarked.ofd", StandardCharsets.UTF_8);
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_TYPE, "application/ofd")
+                    .header(HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename*=UTF-8''" + filename)
+                    .body(result);
+        } catch (Exception e) {
+            log.error("OFD 加水印失败: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body("加水印失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 按页码（1 基，逗号分隔，顺序即输出顺序）从 OFD 提取页面，返回新 OFD。
+     * POST /api/ofd/extract-ofd (multipart: file, pages="1,3,5")
+     */
+    @PostMapping("/extract-ofd")
+    public ResponseEntity<?> extractOfd(
+            @RequestParam("file") MultipartFile file,
+            @RequestParam("pages") String pages) {
+        try {
+            if (file.isEmpty() || !isOfdFilename(file.getOriginalFilename())) {
+                return ResponseEntity.badRequest().body("请上传 OFD 格式文件");
+            }
+            byte[] result = pageService.extractPages(file.getBytes(), parsePages(pages));
+            String base = stripOfdExt(file.getOriginalFilename());
+            String filename = URLEncoder.encode(base + "_提取.ofd", StandardCharsets.UTF_8);
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_TYPE, "application/ofd")
+                    .header(HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename*=UTF-8''" + filename)
+                    .body(result);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(e.getMessage());
+        } catch (Exception e) {
+            log.error("OFD 页面提取失败: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body("提取失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 按页码（1 基，逗号分隔，顺序即输出顺序）从 PDF 提取页面，返回新 PDF。
+     * POST /api/ofd/extract-pdf (multipart: file, pages="1,3,5")
+     */
+    @PostMapping("/extract-pdf")
+    public ResponseEntity<?> extractPdf(
+            @RequestParam("file") MultipartFile file,
+            @RequestParam("pages") String pages) {
+        try {
+            if (file.isEmpty() || !isPdfFilename(file.getOriginalFilename())) {
+                return ResponseEntity.badRequest().body("请上传 PDF 格式文件");
+            }
+            byte[] result = pdfNativeService.extractPages(file.getBytes(), parsePages(pages));
+            String base = stripPdfExt(file.getOriginalFilename());
+            String filename = URLEncoder.encode(base + "_提取.pdf", StandardCharsets.UTF_8);
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_TYPE, "application/pdf")
+                    .header(HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename*=UTF-8''" + filename)
+                    .body(result);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(e.getMessage());
+        } catch (Exception e) {
+            log.error("PDF 页面提取失败: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body("提取失败: " + e.getMessage());
+        }
+    }
+
+    private static WatermarkDTO buildWatermark(String text, Double fontSize, String color,
+                                               Double opacity, Double angle, Boolean bold) {
+        WatermarkDTO wm = new WatermarkDTO();
+        wm.setText(text);
+        wm.setFontSize(fontSize);
+        wm.setColor(color);
+        wm.setOpacity(opacity);
+        wm.setAngle(angle);
+        wm.setBold(bold);
+        return wm;
+    }
+
+    private static List<Integer> parsePages(String pages) {
+        if (pages == null || pages.isBlank()) {
+            throw new IllegalArgumentException("请提供页码");
+        }
+        List<Integer> result = new java.util.ArrayList<>();
+        for (String part : pages.split(",")) {
+            String p = part.trim();
+            if (p.isEmpty()) continue;
+            result.add(Integer.parseInt(p));
+        }
+        if (result.isEmpty()) {
+            throw new IllegalArgumentException("页码无有效值");
+        }
+        return result;
     }
 
     private String getNameWithoutExt(String filename) {

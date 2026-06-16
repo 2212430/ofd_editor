@@ -5,6 +5,7 @@ import com.ofdeditor.dto.AnnotationDTO;
 import com.ofdeditor.dto.OfdDocumentDTO;
 import com.ofdeditor.dto.PageDTO;
 import com.ofdeditor.dto.PdfExportRequest;
+import com.ofdeditor.dto.WatermarkDTO;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.pdfbox.cos.COSArray;
 import org.apache.pdfbox.cos.COSBase;
@@ -439,6 +440,12 @@ public class PdfNativeService {
     /** 把注释以非破坏方式（APPEND 内容流）烘焙进原 PDF（页序不变），返回新 PDF 字节 */
     public byte[] bakeAnnotations(byte[] pdfBytes,
                                   Map<Integer, List<AnnotationDTO>> annotationsByPage) throws Exception {
+        return bakeAnnotations(pdfBytes, annotationsByPage, null);
+    }
+
+    public byte[] bakeAnnotations(byte[] pdfBytes,
+                                  Map<Integer, List<AnnotationDTO>> annotationsByPage,
+                                  WatermarkDTO watermark) throws Exception {
         try (PDDocument doc = PDDocument.load(pdfBytes)) {
             if (annotationsByPage != null) {
                 for (Map.Entry<Integer, List<AnnotationDTO>> entry : annotationsByPage.entrySet()) {
@@ -452,6 +459,12 @@ public class PdfNativeService {
                     stripManagedAnnotations(page);
                     Transform tf = Transform.of(page);
                     drawPageAnnotations(doc, page, tf, anns);
+                }
+            }
+
+            if (hasWatermarkText(watermark)) {
+                for (PDPage page : doc.getPages()) {
+                    drawWatermark(doc, page, watermark);
                 }
             }
 
@@ -469,10 +482,11 @@ public class PdfNativeService {
         List<PdfExportRequest.PageLayout> layout = req != null ? req.getPages() : null;
         Map<Integer, List<AnnotationDTO>> annotations =
                 req != null ? req.getAnnotations() : null;
+        WatermarkDTO watermark = req != null ? req.getWatermark() : null;
 
-        // 没有布局信息时退化为原序烘焙
+        // 没有布局信息时退化为原序烘焙（仍支持水印）
         if (layout == null || layout.isEmpty()) {
-            return bakeAnnotations(pdfBytes, annotations);
+            return bakeAnnotations(pdfBytes, annotations, watermark);
         }
 
         try (PDDocument src = PDDocument.load(pdfBytes);
@@ -498,13 +512,117 @@ public class PdfNativeService {
                     out.addPage(outPage);
                 }
 
+                // 注释在「叠加额外旋转之前」绘制（坐标系与编辑器一致）
                 List<AnnotationDTO> anns = annotations != null ? annotations.get(i) : null;
                 if (anns != null && !anns.isEmpty()) {
                     Transform tf = Transform.of(outPage);
                     drawPageAnnotations(out, outPage, tf, anns);
                 }
+
+                // 水印绘制（用户空间，独立于旋转）
+                if (hasWatermarkText(watermark)) {
+                    drawWatermark(out, outPage, watermark);
+                }
+
+                // 单页旋转持久化：在原始 /Rotate 上叠加，写入 /Rotate（所有阅读器认）
+                Integer rot = pl.getRotate();
+                if (rot != null && normalizeRotation(rot) != 0) {
+                    outPage.setRotation(normalizeRotation(outPage.getRotation() + rot));
+                }
             }
 
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            out.save(baos);
+            return baos.toByteArray();
+        }
+    }
+
+    // ==================== 水印 ====================
+
+    private boolean hasWatermarkText(WatermarkDTO wm) {
+        return wm != null && wm.getText() != null && !wm.getText().isBlank();
+    }
+
+    /** 在某页用户空间绘制文本水印（可平铺、可旋转），独立于页面 /Rotate */
+    private void drawWatermark(PDDocument doc, PDPage page, WatermarkDTO wm) throws Exception {
+        org.apache.pdfbox.pdmodel.font.PDFont font = FontProvider.cjkFont(doc);
+        if (font == null) {
+            log.warn("无可用中文字体，跳过水印绘制");
+            return;
+        }
+        String text = wm.getText();
+        float fontPt = (float) (wm.getFontSize() != null ? wm.getFontSize() : 36.0);
+        double opacity = wm.getOpacity() != null ? wm.getOpacity() : 0.18;
+        double angleDeg = wm.getAngle() != null ? wm.getAngle() : 45.0;
+        boolean tile = wm.getTile() == null || wm.getTile();
+        float[] c = rgb(wm.getColor(), new float[]{0.6f, 0.6f, 0.6f});
+        double rad = Math.toRadians(angleDeg);
+
+        PDRectangle box = page.getMediaBox();
+        float ox = box.getLowerLeftX();
+        float oy = box.getLowerLeftY();
+        float W = box.getWidth();
+        float H = box.getHeight();
+
+        float textW;
+        try {
+            textW = font.getStringWidth(safe(font, text)) / 1000f * fontPt;
+        } catch (Exception e) {
+            textW = text.length() * fontPt * 0.6f;
+        }
+
+        try (PDPageContentStream cs = open(doc, page)) {
+            applyAlpha(doc, cs, opacity);
+            cs.setNonStrokingColor(c[0], c[1], c[2]);
+
+            if (!tile) {
+                drawWatermarkInstance(cs, font, fontPt, text, ox + W / 2f, oy + H / 2f, rad, textW);
+            } else {
+                double gapX = wm.getGapX() != null ? wm.getGapX() : Math.max(textW + 90, 220);
+                double gapY = wm.getGapY() != null ? wm.getGapY() : 150;
+                // 覆盖整页（含旋转外溢）：从负一格到页宽+一格
+                for (double y = oy - gapY; y < oy + H + gapY; y += gapY) {
+                    for (double x = ox - gapX; x < ox + W + gapX; x += gapX) {
+                        drawWatermarkInstance(cs, font, fontPt, text,
+                                (float) x, (float) y, rad, textW);
+                    }
+                }
+            }
+        }
+    }
+
+    private void drawWatermarkInstance(PDPageContentStream cs,
+                                       org.apache.pdfbox.pdmodel.font.PDFont font,
+                                       float fontPt, String text,
+                                       float cx, float cy, double rad, float textW) throws Exception {
+        // 让文字以 (cx,cy) 为中心：沿旋转轴回退半个文本宽
+        float sx = (float) (cx - Math.cos(rad) * textW / 2.0);
+        float sy = (float) (cy - Math.sin(rad) * textW / 2.0);
+        cs.beginText();
+        cs.setFont(font, fontPt);
+        cs.setTextMatrix(Matrix.getRotateInstance(rad, sx, sy));
+        cs.showText(safe(font, text));
+        cs.endText();
+    }
+
+    // ==================== 页面提取 ====================
+
+    /**
+     * 从 PDF 中按页号（1 基）提取指定页，生成新的 PDF。
+     */
+    public byte[] extractPages(byte[] pdfBytes, List<Integer> pageNumbers1Based) throws Exception {
+        try (PDDocument src = PDDocument.load(pdfBytes);
+             PDDocument out = new PDDocument()) {
+            int total = src.getNumberOfPages();
+            for (Integer n : pageNumbers1Based) {
+                if (n == null) continue;
+                int idx = n - 1;
+                if (idx < 0 || idx >= total) continue;
+                out.importPage(src.getPage(idx));
+            }
+            if (out.getNumberOfPages() == 0) {
+                throw new IllegalArgumentException("提取的页码范围无有效页面");
+            }
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
             out.save(baos);
             return baos.toByteArray();

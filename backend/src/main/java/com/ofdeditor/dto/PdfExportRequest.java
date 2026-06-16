@@ -19,6 +19,9 @@ public class PdfExportRequest {
     /** 注释：key = 当前页序号（与 pages 下标一致），value = 该页注释 */
     private Map<Integer, List<AnnotationDTO>> annotations;
 
+    /** 全局水印（可空） */
+    private WatermarkDTO watermark;
+
     @Data
     public static class PageLayout {
         /** 原始 PDF 页号（0 基）；为 null 表示新插入的空白页 */
@@ -27,5 +30,7 @@ public class PdfExportRequest {
         private Double widthMm;
         /** 页高（mm，空白页用） */
         private Double heightMm;
+        /** 单页额外旋转（度，0/90/180/270），在原始 /Rotate 基础上叠加并持久化 */
+        private Integer rotate;
     }
 }

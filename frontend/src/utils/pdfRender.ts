@@ -89,8 +89,62 @@ export async function renderPdfPage(
     }
 }
 
+export interface PageTextItem {
+    str: string
+    /** 左上角 X（mm，可视页坐标，左上原点，未叠加视图旋转） */
+    xMm: number
+    /** 左上角 Y（mm） */
+    yMm: number
+    /** 宽（mm） */
+    wMm: number
+    /** 高（mm，约等于字号） */
+    hMm: number
+}
+
+const PT_TO_MM = 25.4 / 72
+const textItemCache = new Map<string, PageTextItem[]>()
+
+/**
+ * 提取某页的文本项（用于全文搜索 + 文本选择）。
+ * 坐标统一转换为「可视页 mm，左上原点」，与画布元素坐标系一致。
+ */
+export async function getPdfPageTextItems(token: string, pageIndex: number): Promise<PageTextItem[]> {
+    const key = `${token}:${pageIndex}`
+    const cached = textItemCache.get(key)
+    if (cached) return cached
+
+    const doc = await mustDoc(token)
+    const page = await doc.getPage(pageIndex + 1)
+    // scale=1 → 1px=1pt(72dpi)，viewport 已含 /Rotate，原点左上、y 向下
+    const viewport = page.getViewport({ scale: 1 })
+    const tc = await page.getTextContent()
+
+    const out: PageTextItem[] = []
+    for (const raw of tc.items) {
+        const item = raw as any
+        if (typeof item.str !== 'string' || item.str.length === 0) continue
+        const tx = pdfjsLib.Util.transform(viewport.transform, item.transform)
+        const fontHeight = Math.hypot(tx[2], tx[3]) || Math.abs(tx[3]) || 1
+        const x = tx[4]
+        const y = tx[5] - fontHeight
+        const w = typeof item.width === 'number' ? item.width : 0
+        out.push({
+            str: item.str,
+            xMm: x * PT_TO_MM,
+            yMm: y * PT_TO_MM,
+            wMm: w * PT_TO_MM,
+            hMm: fontHeight * PT_TO_MM,
+        })
+    }
+    textItemCache.set(key, out)
+    return out
+}
+
 /** 释放某文档，回收内存 */
 export async function releasePdfDocument(token: string): Promise<void> {
+    for (const k of Array.from(textItemCache.keys())) {
+        if (k.startsWith(token + ':')) textItemCache.delete(k)
+    }
     const entry = docs.get(token)
     docs.delete(token)
     for (const key of Array.from(renderTasks.keys())) {

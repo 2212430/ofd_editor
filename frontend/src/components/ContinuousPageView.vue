@@ -33,7 +33,7 @@ import type { ComponentPublicInstance } from 'vue'
 import CanvasEditor from '@/components/CanvasEditor.vue'
 import { useEditorStore } from '@/stores/editorStore'
 import type { PageData } from '@/types'
-import { viewStagePixelSize } from '@/utils/viewRotation'
+import { viewStagePixelSize, normalizeViewRotation } from '@/utils/viewRotation'
 
 const MM_TO_PX = 96 / 25.4
 const PAGE_GAP_PX = 28
@@ -56,7 +56,7 @@ function canvasFrameStyle(page: PageData) {
       page.width,
       page.height,
       scale.value,
-      store.viewRotation,
+      normalizeViewRotation((page.pageRotate ?? 0) + store.viewRotation),
   )
   return {
     width: `${stageWidth}px`,
@@ -69,7 +69,7 @@ function slotMinHeightMm(page: PageData) {
       page.width,
       page.height,
       scale.value,
-      store.viewRotation,
+      normalizeViewRotation((page.pageRotate ?? 0) + store.viewRotation),
   )
   return stageHeight + PAGE_GAP_PX + LABEL_HEIGHT_PX
 }

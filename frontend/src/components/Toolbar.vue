@@ -171,6 +171,18 @@
           <RibbonButton label="选择" :icon="Rank" :active="store.currentTool === 'SELECT'" @click="store.setTool('SELECT')" />
         </RibbonGroup>
         <RibbonSep />
+        <RibbonGroup label="查找">
+          <RibbonButton label="全文搜索" :icon="Search" :disabled="!store.document" tooltip="搜索文档文本（Ctrl+F）" @click="store.openSearch()" />
+          <RibbonButton
+              label="文本选择"
+              :icon="DocumentCopy"
+              :disabled="!store.document"
+              :active="store.textSelectMode"
+              tooltip="开启后可在页面上选中并复制文本"
+              @click="store.toggleTextSelectMode()"
+          />
+        </RibbonGroup>
+        <RibbonSep />
         <RibbonGroup label="缩放">
           <RibbonButton label="放大" :icon="ZoomIn" @click="store.setScale(store.scale + 0.25)" />
           <RibbonButton label="缩小" :icon="ZoomOut" @click="store.setScale(store.scale - 0.25)" />
@@ -227,6 +239,38 @@
           <RibbonButton label="删除页面" :icon="Delete" :disabled="!store.document || (store.document?.pageCount ?? 0) <= 1" @click="handleDeletePage" />
           <RibbonButton label="复制页面" :icon="CopyDocument" :disabled="!store.document" @click="handleCopyPage" />
           <RibbonButton label="重排页面" :icon="Sort" :disabled="!store.document" tooltip="拖动左侧缩略图调整顺序" @click="handleReorderHint" />
+          <RibbonButton
+              label="顺时针转页"
+              :icon="RefreshRight"
+              :disabled="!store.document"
+              tooltip="持久旋转当前页 90°（保存/导出后生效）"
+              @click="handleRotatePage(true)"
+          />
+          <RibbonButton
+              label="逆时针转页"
+              :icon="RefreshLeft"
+              :disabled="!store.document"
+              tooltip="持久旋转当前页 -90°"
+              @click="handleRotatePage(false)"
+          />
+          <RibbonButton
+              label="提取页面"
+              :icon="Scissor"
+              :disabled="!store.document"
+              tooltip="按页码范围提取为新文件"
+              @click="extractDialogVisible = true"
+          />
+        </RibbonGroup>
+        <RibbonSep />
+        <RibbonGroup label="水印">
+          <RibbonButton
+              label="文本水印"
+              :icon="Stamp"
+              :disabled="!store.document"
+              :active="!!store.watermarkConfig"
+              tooltip="设置全局文本水印，保存/导出时烘焙"
+              @click="watermarkDialogVisible = true"
+          />
         </RibbonGroup>
         <RibbonSep />
         <RibbonGroup label="插入">
@@ -286,11 +330,26 @@
 
       <!-- ===== 保护 ===== -->
       <template v-else-if="activeTab === 'protect'">
+        <RibbonGroup label="电子签章">
+          <RibbonButton
+              label="国密签章"
+              :icon="Medal"
+              :disabled="!store.document || store.isPdfDocument"
+              tooltip="为 OFD 加盖国密（GM/T 0099 SES v4）电子签章"
+              @click="openSignDialog"
+          />
+          <RibbonButton
+              label="验证签章"
+              :icon="CircleCheck"
+              :disabled="!store.document || store.isPdfDocument"
+              tooltip="校验当前 OFD 的电子签章 / 数字签名"
+              @click="handleVerifySignature"
+          />
+        </RibbonGroup>
+        <RibbonSep />
         <RibbonGroup label="安全">
           <RibbonButton label="加密" :icon="Lock" disabled tooltip="即将推出" @click="comingSoon" />
           <RibbonButton label="权限设置" :icon="Key" disabled tooltip="即将推出" @click="comingSoon" />
-          <RibbonButton label="数字签名" :icon="Stamp" disabled tooltip="即将推出" @click="comingSoon" />
-          <RibbonButton label="国密签章" :icon="Medal" disabled tooltip="即将推出" @click="comingSoon" />
         </RibbonGroup>
       </template>
 
@@ -317,6 +376,9 @@
     <OfdSplitDialog v-model="ofdSplitDialogVisible" />
     <PdfSplitDialog v-model="pdfSplitDialogVisible" />
     <ImageCropDialog v-model="store.imageCropDialogVisible" />
+    <SignSealDialog v-model="signDialogVisible" />
+    <WatermarkDialog v-model="watermarkDialogVisible" />
+    <ExtractPagesDialog v-model="extractDialogVisible" />
   </div>
 </template>
 
@@ -331,6 +393,7 @@ import {
   InfoFilled, Rank, FullScreen, View, Expand, Crop,
   Document, Reading, Sort, Picture, Files, PictureFilled,
   Lock, Key, Stamp, Medal, QuestionFilled, Clock, Scissor,
+  Search, DocumentCopy, CircleCheck,
 } from '@element-plus/icons-vue'
 import { useEditorStore } from '@/stores/editorStore'
 import {
@@ -345,6 +408,9 @@ import PdfMergeDialog from '@/components/PdfMergeDialog.vue'
 import OfdSplitDialog from '@/components/OfdSplitDialog.vue'
 import PdfSplitDialog from '@/components/PdfSplitDialog.vue'
 import ImageCropDialog from '@/components/ImageCropDialog.vue'
+import SignSealDialog from '@/components/SignSealDialog.vue'
+import WatermarkDialog from '@/components/WatermarkDialog.vue'
+import ExtractPagesDialog from '@/components/ExtractPagesDialog.vue'
 
 const HandIcon = defineComponent({
   name: 'HandIcon',
@@ -376,6 +442,9 @@ const mergeDialogVisible = ref(false)
 const pdfMergeDialogVisible = ref(false)
 const ofdSplitDialogVisible = ref(false)
 const pdfSplitDialogVisible = ref(false)
+const signDialogVisible = ref(false)
+const watermarkDialogVisible = ref(false)
+const extractDialogVisible = ref(false)
 const activeTab = ref('home')
 
 const canSplitOfd = computed(
@@ -406,6 +475,35 @@ function switchTab(tab: typeof tabs[0]) {
 
 function comingSoon() {
   ElMessage.info('该功能即将推出，敬请期待')
+}
+
+function openSignDialog() {
+  if (!store.document) { ElMessage.warning('请先打开 OFD 文档'); return }
+  if (store.isPdfDocument) { ElMessage.warning('国密签章仅支持 OFD 文档'); return }
+  signDialogVisible.value = true
+}
+
+async function handleVerifySignature() {
+  if (!store.document) { ElMessage.warning('请先打开 OFD 文档'); return }
+  if (store.isPdfDocument) { ElMessage.warning('验签仅支持 OFD 文档'); return }
+  if (!store.currentFile) {
+    ElMessage.warning('未找到原始 OFD 文件，请重新打开后再验签')
+    return
+  }
+  store.setLoading(true, '正在验证签章…')
+  try {
+    const result = await ofdApi.verifySignature(store.currentFile)
+    const icon = !result.signed ? 'info' : (result.valid ? 'success' : 'error')
+    const detail = result.signed ? `\n\n签名个数：${result.count}` : ''
+    await ElMessageBox.alert(result.message + detail, '验签结果', {
+      type: icon as any,
+      confirmButtonText: '知道了',
+    })
+  } catch (err: any) {
+    ElMessage.error(err?.message ?? '验签失败')
+  } finally {
+    store.setLoading(false)
+  }
 }
 
 function handleOpenImageCrop() {
@@ -709,6 +807,12 @@ async function handleCopyPage() {
 
 function handleReorderHint() {
   ElMessage.info('请在左侧页面列表中拖动缩略图调整页面顺序')
+}
+
+function handleRotatePage(clockwise: boolean) {
+  if (store.rotateCurrentPagePersist(clockwise)) {
+    ElMessage.success(`第 ${store.currentPageIndex + 1} 页已旋转，保存或导出后生效`)
+  }
 }
 
 async function handleDeletePage() {

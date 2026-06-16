@@ -127,6 +127,8 @@ export interface PageData {
     sourcePageIndex?: number
     width: number
     height: number
+    /** 单页持久旋转（0/90/180/270）；PDF 导出写入 /Rotate，OFD 旋转时同步变换元素 */
+    pageRotate?: number
     elements: ElementData[]
     annotations?: AnnotationData[]   // ← 新增
 }
@@ -144,6 +146,18 @@ export interface DocumentData {
     author?: string
     pageCount: number
     pages: PageData[]
+    /** 保存/导出时烘焙的全局文本水印（可空） */
+    watermark?: WatermarkConfig
+}
+
+export interface WatermarkConfig {
+    text: string
+    fontSize?: number
+    color?: string
+    opacity?: number
+    angle?: number
+    tile?: boolean
+    bold?: boolean
 }
 
 // ========== API响应（保持不变） ==========
@@ -162,4 +176,22 @@ export interface AnnotationResponse {
 
 export interface AnnotationsByPage {
     [pageIndex: number]: AnnotationData[];
+}
+
+// ========== 电子签章 / 验签 ==========
+export interface SignatureVerifyItem {
+    id?: string
+    type?: string
+    valid: boolean
+    sealName?: string
+    signDate?: string
+    message?: string
+}
+
+export interface SignatureVerifyResult {
+    signed: boolean
+    count: number
+    valid: boolean
+    message: string
+    signatures: SignatureVerifyItem[]
 }
