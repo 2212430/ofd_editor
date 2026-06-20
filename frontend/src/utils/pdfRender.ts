@@ -99,6 +99,12 @@ export interface PageTextItem {
     wMm: number
     /** 高（mm，约等于字号） */
     hMm: number
+    /** 可选：OFD 解析出的字号（mm） */
+    fontSizeMm?: number
+    glyphAdvanceMm?: number
+    verticalLayout?: boolean
+    passwordGrid?: boolean
+    fontSizeOverridden?: boolean
 }
 
 const PT_TO_MM = 25.4 / 72
@@ -126,14 +132,17 @@ export async function getPdfPageTextItems(token: string, pageIndex: number): Pro
         const tx = pdfjsLib.Util.transform(viewport.transform, item.transform)
         const fontHeight = Math.hypot(tx[2], tx[3]) || Math.abs(tx[3]) || 1
         const x = tx[4]
-        const y = tx[5] - fontHeight
+        // PDF 基线 → 左上：略减小 ascent 偏移，与浏览器渲染更接近
+        const y = tx[5] - fontHeight * 0.88
         const w = typeof item.width === 'number' ? item.width : 0
+        const hMm = fontHeight * PT_TO_MM
         out.push({
             str: item.str,
             xMm: x * PT_TO_MM,
             yMm: y * PT_TO_MM,
             wMm: w * PT_TO_MM,
-            hMm: fontHeight * PT_TO_MM,
+            hMm,
+            fontSizeMm: hMm,
         })
     }
     textItemCache.set(key, out)

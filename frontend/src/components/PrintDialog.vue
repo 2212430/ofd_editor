@@ -25,7 +25,10 @@
         >
           <template #prepend>页码</template>
         </el-input>
-        <div class="hint" v-if="resolvedCount > 0">将打印 {{ resolvedCount }} 页 × {{ opts.copies }} 份</div>
+        <div class="hint" v-if="resolvedCount > 0">
+          将打印 {{ resolvedCount }} 页 × {{ opts.copies }} 份
+          <template v-if="opts.duplex !== 'simplex' && sheetCount % 2 === 1">（双面时将补 1 页空白）</template>
+        </div>
         <div class="hint hint-warn" v-else>未匹配到有效页码</div>
       </section>
 
@@ -41,6 +44,16 @@
         </div>
 
         <div class="opt-row">
+          <span class="opt-label">单双面</span>
+          <el-segmented v-model="opts.duplex" :options="duplexOptions" size="small" />
+        </div>
+
+        <div class="opt-row">
+          <span class="opt-label">颜色</span>
+          <el-segmented v-model="opts.colorMode" :options="colorModeOptions" size="small" />
+        </div>
+
+        <div class="opt-row">
           <span class="opt-label">缩放</span>
           <el-segmented v-model="opts.fit" :options="fitOptions" size="small" />
         </div>
@@ -48,6 +61,9 @@
         <div class="opt-row">
           <span class="opt-label">份数</span>
           <el-input-number v-model="opts.copies" :min="1" :max="99" size="small" />
+        </div>
+        <div v-if="opts.duplex !== 'simplex'" class="hint hint-sub">
+          双面打印需在系统打印对话框中确认打印机双面选项
         </div>
       </section>
 
@@ -118,10 +134,20 @@ const qualityOptions = [
   { label: '标准', value: 'standard' },
   { label: '高清', value: 'high' },
 ]
+const duplexOptions = [
+  { label: '单面', value: 'simplex' },
+  { label: '双面长边', value: 'duplex-long' },
+  { label: '双面短边', value: 'duplex-short' },
+]
+const colorModeOptions = [
+  { label: '彩色', value: 'color' },
+  { label: '黑白', value: 'grayscale' },
+]
 
 const resolvedCount = computed(() =>
-    resolvePageIndices(opts, pageCount.value, currentPageIndex.value).length
+    resolvePageIndices(opts, pageCount.value, currentPageIndex.value).length,
 )
+const sheetCount = computed(() => resolvedCount.value * opts.copies)
 
 function onOpen() {
   // 每次打开重置范围为「全部」，但保留上次的布局偏好
@@ -167,6 +193,8 @@ function confirmPrint() {
   color: var(--text-2, #4a505a);
 }
 .hint { font-size: 12px; color: var(--text-3, #8b929c); }
+.hint-sub { margin-top: -6px; line-height: 1.5; }
 .hint-warn { color: #e6a23c; }
+.print-dialog :deep(.el-segmented) { flex: 1; }
 .print-dialog :deep(.el-divider--horizontal) { margin: 8px 0 16px; }
 </style>

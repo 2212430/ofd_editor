@@ -280,7 +280,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch, withD
 import { ElMessage } from 'element-plus'
 import { useEditorStore } from '@/stores/editorStore'
 import type { PageData, ElementData, AnnotationData } from '@/types'
-import { konvaStageRotationConfig, normalizeViewRotation } from '@/utils/viewRotation'
+import { effectivePageSizeMm, konvaStageRotationConfig, normalizeViewRotation } from '@/utils/viewRotation'
 import { renderPdfPage, type PageTextItem } from '@/utils/pdfRender'
 
 // ─────────────────────────────────────────────
@@ -2022,7 +2022,12 @@ async function captureForPrint(
     stage?.draw?.()
   }
 
-  return { dataUrl, width: props.page.width, height: props.page.height }
+  const rotation = props.offscreen
+      ? normalizeViewRotation(props.page.pageRotate ?? 0)
+      : normalizeViewRotation((props.page.pageRotate ?? 0) + store.viewRotation)
+  const eff = effectivePageSizeMm(props.page.width, props.page.height, rotation)
+
+  return { dataUrl, width: eff.widthMm, height: eff.heightMm }
 }
 
 defineExpose({ captureForPrint })

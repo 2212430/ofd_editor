@@ -362,6 +362,12 @@ async function handlePrint(opts: PrintOptions) {
   const doc = store.document
   if (!doc) return
 
+  const indices = resolvePageIndices(opts, doc.pageCount, store.currentPageIndex)
+  if (indices.length === 0) {
+    ElMessage.warning('没有可打印的页面')
+    return
+  }
+
   // 1) 先在用户手势内打开打印窗口，避免被浏览器拦截
   const win = window.open('', '_blank', 'width=920,height=1200')
   if (!win) {
@@ -371,10 +377,9 @@ async function handlePrint(opts: PrintOptions) {
   win.document.write(
     '<!doctype html><meta charset="utf-8"><title>正在准备打印…</title>' +
     '<body style="font-family:sans-serif;color:#666;padding:48px;background:#f4f5f7">' +
-    '正在渲染页面，请稍候…</body>'
+    '正在渲染页面，请稍候…</body>',
   )
 
-  const indices = resolvePageIndices(opts, doc.pageCount, store.currentPageIndex)
   const pixelRatio = qualityToPixelRatio(opts.quality)
 
   // 2) 保存当前视图状态，逐页渲染捕获
@@ -391,8 +396,19 @@ async function handlePrint(opts: PrintOptions) {
       const idx = indices[i]
       store.setLoading(true, `正在渲染第 ${i + 1} / ${indices.length} 页…`)
       store.setCurrentPage(idx)
-      await nextTick()
-      const cap = await getActiveCanvas()?.captureForPrint(pixelRatio, opts.includeAnnotations)
+
+      if (store.pageViewMode === 'continuous') {
+        continuousViewRef.value?.ensurePageMounted(idx)
+      }
+      await waitForCanvasPaint()
+
+      const canvas = getActiveCanvas()
+      if (!canvas) {
+        console.warn('[print] 第', idx + 1, '页画布未就绪，已跳过')
+        continue
+      }
+
+      const cap = await canvas.captureForPrint(pixelRatio, opts.includeAnnotations)
       if (cap?.dataUrl) {
         captured.push({ index: idx, ...cap })
       }
@@ -409,7 +425,7 @@ async function handlePrint(opts: PrintOptions) {
   // 3) 写入打印窗口并触发打印
   if (captured.length === 0) {
     win.close()
-    ElMessage.warning('没有可打印的页面')
+    ElMessage.warning('没有可打印的页面（画布未就绪或存在跨域图片）')
     return
   }
   buildPrintWindow(win, captured, opts, doc.title || 'OFD 文档')

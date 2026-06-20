@@ -6,6 +6,7 @@ import type {
 } from '@/types'
 import { ofdApi } from '@/api/ofdApi'
 import { getPdfPageTextItems, type PageTextItem } from '@/utils/pdfRender'
+import { matchRectsInTextItem, type SearchRect } from '@/utils/textMetrics'
 import {
     normalizePageRotate,
     rotateAnnotationInPage,
@@ -59,7 +60,6 @@ export const useEditorStore = defineStore('editor', () => {
 
     // ==================== 全文搜索 / 文本选择 ====================
     /** 单个命中：所在页 + 一组高亮矩形（mm，可视页坐标，左上原点） */
-    interface SearchRect { x: number; y: number; w: number; h: number }
     interface SearchMatch { pageIndex: number; rects: SearchRect[]; snippet: string }
 
     const searchVisible = ref(false)
@@ -106,6 +106,11 @@ export const useEditorStore = defineStore('editor', () => {
                         yMm: el.y,
                         wMm: el.width,
                         hMm: el.height,
+                        fontSizeMm: el.fontSize,
+                        glyphAdvanceMm: el.glyphAdvanceMm,
+                        verticalLayout: el.verticalLayout,
+                        passwordGrid: el.passwordGrid,
+                        fontSizeOverridden: el.fontSizeOverridden,
                     }))
             }
         }
@@ -140,24 +145,6 @@ export const useEditorStore = defineStore('editor', () => {
         textSelectMode.value = on ?? !textSelectMode.value
     }
 
-    /** 在某行字符串内查找全部匹配，按字符比例换算子矩形 */
-    function matchRectsInItem(item: PageTextItem, query: string, lowerQuery: string): SearchRect[] {
-        const rects: SearchRect[] = []
-        const lower = item.str.toLowerCase()
-        const len = item.str.length
-        if (len === 0) return rects
-        let from = 0
-        while (true) {
-            const idx = lower.indexOf(lowerQuery, from)
-            if (idx < 0) break
-            const x = item.xMm + (idx / len) * item.wMm
-            const w = (query.length / len) * item.wMm
-            rects.push({ x, y: item.yMm, w, h: item.hMm })
-            from = idx + Math.max(1, query.length)
-        }
-        return rects
-    }
-
     async function runSearch(query: string) {
         searchQuery.value = query
         const q = query.trim()
@@ -173,7 +160,8 @@ export const useEditorStore = defineStore('editor', () => {
             for (let pi = 0; pi < pageCount; pi++) {
                 const items = await getPageTextItems(pi)
                 for (const item of items) {
-                    const rects = matchRectsInItem(item, q, lowerQ)
+                    const mode = documentKind.value === 'pdf' ? 'pdf' : 'ofd'
+                    const rects = matchRectsInTextItem(item, q, lowerQ, mode)
                     for (const r of rects) {
                         matches.push({ pageIndex: pi, rects: [r], snippet: item.str })
                     }
