@@ -15,6 +15,7 @@ import com.ofdeditor.service.OfdRebuildService;
 import com.ofdeditor.service.OfdSplitService;
 import com.ofdeditor.service.PdfMergeService;
 import com.ofdeditor.service.PdfNativeService;
+import com.ofdeditor.service.PdfToWordService;
 import com.ofdeditor.service.OfdPageService;
 import com.ofdeditor.service.OfdSignatureService;
 import com.ofdeditor.util.SplitPayloadUtil;
@@ -43,6 +44,7 @@ public class OfdController {
     private final PdfMergeService pdfMergeService;
     private final PdfNativeService pdfNativeService;
     private final ConversionService conversionService;
+    private final PdfToWordService pdfToWordService;
     private final OfdRebuildService rebuildService;
     private final OfdCacheService cacheService;
     private final AnnotationService annotationService;
@@ -590,6 +592,7 @@ public class OfdController {
 
     // ==================== 格式转换 ====================
 
+    /** OFD 转 PDF：使用 ofdrw PDFExporterPDFBox 矢量导出（保留文本/矢量，非整页截图） */
     @PostMapping("/to-pdf")
     public ResponseEntity<?> convertToPdf(@RequestParam("file") MultipartFile file) {
         try {
@@ -604,6 +607,34 @@ public class OfdController {
                     .body(pdfBytes);
         } catch (Exception e) {
             log.error("OFD转PDF失败: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body("转换失败: " + e.getMessage());
+        }
+    }
+
+    /** PDF 转 Word（.docx），底层使用 Python pdf2docx。OFD 可先「OFD转PDF」再调用本接口。 */
+    @PostMapping("/pdf-to-word")
+    public ResponseEntity<?> convertPdfToWord(@RequestParam("file") MultipartFile file) {
+        try {
+            if (file.isEmpty()) {
+                return ResponseEntity.badRequest().body("请选择 PDF 文件");
+            }
+            if (!isPdfFilename(file.getOriginalFilename())) {
+                return ResponseEntity.badRequest().body("请上传 PDF 格式文件");
+            }
+            byte[] docxBytes = pdfToWordService.convert(file);
+            String filename = URLEncoder.encode(
+                    getNameWithoutExt(file.getOriginalFilename()) + ".docx",
+                    StandardCharsets.UTF_8);
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_TYPE,
+                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                    .header(HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename*=UTF-8''" + filename)
+                    .body(docxBytes);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(e.getMessage());
+        } catch (Exception e) {
+            log.error("PDF转Word失败: {}", e.getMessage(), e);
             return ResponseEntity.internalServerError().body("转换失败: " + e.getMessage());
         }
     }

@@ -2,18 +2,14 @@ package com.ofdeditor.service;
 
 import lombok.extern.slf4j.Slf4j;
 import org.apache.pdfbox.pdmodel.PDDocument;
-import org.apache.pdfbox.pdmodel.PDPage;
-import org.apache.pdfbox.pdmodel.PDPageContentStream;
-import org.apache.pdfbox.pdmodel.graphics.image.LosslessFactory;
-import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
 import org.apache.pdfbox.rendering.ImageType;
 import org.apache.pdfbox.rendering.PDFRenderer;
+import org.ofdrw.converter.export.PDFExporterPDFBox;
 import org.ofdrw.layout.OFDDoc;
 import org.ofdrw.layout.PageLayout;
 import org.ofdrw.layout.VirtualPage;
 import org.ofdrw.layout.element.Img;
 import org.ofdrw.layout.element.Position;
-import org.ofdrw.reader.OFDReader;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -28,44 +24,25 @@ import java.util.List;
 @Service
 public class ConversionService {
 
-    private static final double OFD_RENDER_PPM = 150.0 / 25.4; // 150 DPI 转 像素/毫米
     private static final float PDF_RENDER_DPI = 150f;
     private static final double PT_TO_MM = 25.4 / 72.0;
 
     // ─────────────────────────────────────────
-    // OFD → PDF
+    // OFD → PDF（矢量/文本保留，ofdrw PdfboxMaker）
     // ─────────────────────────────────────────
     public byte[] ofdToPdf(MultipartFile file) throws Exception {
         Path tempOfd = Files.createTempFile("ofd_in_", ".ofd");
         Path tempPdf = Files.createTempFile("pdf_out_", ".pdf");
         try {
             file.transferTo(tempOfd);
-            log.info("开始 OFD->PDF 转换: {}", file.getOriginalFilename());
+            log.info("开始 OFD->PDF 矢量转换: {}", file.getOriginalFilename());
 
-            try (OFDReader reader = new OFDReader(tempOfd);
-                 PDDocument pdfDoc = new PDDocument()) {
-
-                int pageCount = reader.getNumberOfPages();
-                log.info("OFD 共 {} 页", pageCount);
-
-                for (int i = 0; i < pageCount; i++) {
-                    BufferedImage img = renderOfdPage(tempOfd, i + 1);
-                    PDPage pdfPage = new PDPage(
-                            new org.apache.pdfbox.pdmodel.common.PDRectangle(
-                                    img.getWidth(), img.getHeight()));
-                    pdfDoc.addPage(pdfPage);
-                    PDImageXObject pdImg = LosslessFactory.createFromImage(pdfDoc, img);
-                    try (PDPageContentStream cs = new PDPageContentStream(pdfDoc, pdfPage)) {
-                        cs.drawImage(pdImg, 0, 0, img.getWidth(), img.getHeight());
-                    }
-                    log.debug("PDF 第 {} 页写入完成 {}x{}", i + 1, img.getWidth(), img.getHeight());
-                }
-
-                pdfDoc.save(tempPdf.toFile());
+            try (PDFExporterPDFBox exporter = new PDFExporterPDFBox(tempOfd, tempPdf)) {
+                exporter.export();
             }
 
             byte[] result = Files.readAllBytes(tempPdf);
-            log.info("OFD->PDF 完成，输出大小: {} bytes", result.length);
+            log.info("OFD->PDF 矢量转换完成，输出大小: {} bytes", result.length);
             return result;
 
         } finally {
@@ -93,7 +70,7 @@ public class ConversionService {
                 log.info("PDF 共 {} 页", pageCount);
 
                 for (int i = 0; i < pageCount; i++) {
-                    PDPage pdfPage = pdfDoc.getPage(i);
+                    var pdfPage = pdfDoc.getPage(i);
                     var mediaBox = pdfPage.getMediaBox();
                     double widthMm = mediaBox.getWidth() * PT_TO_MM;
                     double heightMm = mediaBox.getHeight() * PT_TO_MM;
@@ -126,31 +103,6 @@ public class ConversionService {
             for (Path p : tempImages) Files.deleteIfExists(p);
             Files.deleteIfExists(tempPdf);
             Files.deleteIfExists(tempOfd);
-        }
-    }
-    private BufferedImage renderOfdPage(Path ofdPath, int pageNum) throws Exception {
-        // 优先尝试直接调用（避免反射开销）
-        try {
-            return renderDirect(ofdPath, pageNum);
-        } catch (NoClassDefFoundError | ClassNotFoundException e) {
-            throw new IllegalStateException(
-                    "ofdrw-converter 不在 classpath，请检查 pom.xml", e);
-        } catch (Exception e) {
-            log.error("第 {} 页渲染失败: {}", pageNum, e.getMessage(), e);
-            throw new IllegalStateException("OFD 第 " + pageNum + " 页渲染失败: " + e.getMessage(), e);
-        }
-    }
-
-    private BufferedImage renderDirect(Path ofdPath, int pageNum) throws Exception {
-        // pageNum 外部传入从 1 开始，这里转成 0-based index
-        try (OFDReader reader = new OFDReader(ofdPath)) {
-            org.ofdrw.converter.ImageMaker maker =
-                    new org.ofdrw.converter.ImageMaker(reader, OFD_RENDER_PPM);
-            BufferedImage img = maker.makePage(pageNum - 1); // ← 关键：减1
-            if (img == null) {
-                throw new IllegalStateException("makePage(" + (pageNum - 1) + ") 返回 null");
-            }
-            return img;
         }
     }
 }

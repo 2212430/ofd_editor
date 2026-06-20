@@ -18,3 +18,10 @@ spring:
 logging:
   level:
     com.ofdeditor: DEBUG
+
+# PDF → Word（pdf2docx，需 Python: pip install -r backend/requirements-pdf2docx.txt）
+ofd:
+  pdf2docx:
+    python: python
+    # script-path: D:/ofd-editor/backend/tools/pdf_to_docx.py
+    timeout-seconds: 600

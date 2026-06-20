@@ -3,6 +3,7 @@
     <!-- 隐藏文件输入 -->
     <input ref="ofdInputRef" type="file" accept=".ofd" style="display:none" @change="handleOfdUpload" />
     <input ref="pdfInputRef" type="file" accept=".pdf" style="display:none" @change="handlePdfImport" />
+    <input ref="pdfToWordInputRef" type="file" accept=".pdf" style="display:none" @change="handlePdfToWordFile" />
     <input ref="imageInputRef" type="file" accept="image/*" style="display:none" @change="handleImageImport" />
     <input ref="stampInputRef" type="file" accept="image/*" style="display:none" @change="handleStampImageSelect" />
 
@@ -291,6 +292,12 @@
           <RibbonButton label="PDF转OFD" :icon="Upload" @click="pdfInputRef?.click()" />
           <RibbonButton label="OFD转PDF" :icon="Download" :disabled="!store.document" @click="handleExportPdf" />
           <RibbonButton
+              label="PDF转Word"
+              :icon="Document"
+              tooltip="将 PDF 转为 Word（.docx）。OFD 可先「OFD转PDF」；已打开的原生 PDF 可直接转换当前文档（含批注）"
+              @click="handlePdfToWord"
+          />
+          <RibbonButton
               label="OFD合并"
               :icon="Files"
               tooltip="合并两个 OFD：第一个文件的页面在前，第二个在后"
@@ -435,6 +442,7 @@ const HandIcon = defineComponent({
 const store = useEditorStore()
 const ofdInputRef = ref<HTMLInputElement>()
 const pdfInputRef = ref<HTMLInputElement>()
+const pdfToWordInputRef = ref<HTMLInputElement>()
 const imageInputRef = ref<HTMLInputElement>()
 const stampInputRef = ref<HTMLInputElement>()
 const docPropsVisible = ref(false)
@@ -540,7 +548,7 @@ function showHelp() {
       '4. 「编辑 → 插入」可导入图片到当前页\n' +
       '5. 「注释 → 导入图章」选择图片后点击页面放置图章\n' +
       '6. 「注释」添加高亮、图形等批注\n' +
-      '7. 「转换」导出 PDF；「文件 → 打印」输出纸质或 PDF',
+      '7. 「转换」OFD↔PDF、PDF 转 Word；「文件 → 打印」输出纸质或 PDF',
       '快速上手',
       { confirmButtonText: '知道了' }
   )
@@ -548,7 +556,7 @@ function showHelp() {
 
 function showAbout() {
   ElMessageBox.alert(
-      'OFD Studio v1.0\n开放版式文档（OFD）编辑器\n\n支持：解析 · 编辑 · 批注 · PDF 双向转换 · 打印',
+      'OFD Studio v1.0\n开放版式文档（OFD）编辑器\n\n支持：解析 · 编辑 · 批注 · PDF 双向转换 · PDF 转 Word · 打印',
       '关于 OFD Studio',
       { confirmButtonText: '确定' }
   )
@@ -763,6 +771,54 @@ async function handleExportPdf() {
   } finally {
     store.setLoading(false)
   }
+}
+
+function docxFilenameFromPdfName(name: string): string {
+  const base = (name || 'export').replace(/\.pdf$/i, '').trim() || 'export'
+  return `${base}.docx`
+}
+
+async function convertPdfFileToWord(file: File) {
+  store.setLoading(true, '正在转换为 Word（pdf2docx，请稍候）...')
+  try {
+    const blob = await ofdApi.pdfToWord(file)
+    downloadBlob(blob, docxFilenameFromPdfName(file.name))
+    ElMessage.success('Word 已开始下载')
+  } catch (err: any) {
+    ElMessage.error(err.message || 'PDF 转 Word 失败')
+  } finally {
+    store.setLoading(false)
+  }
+}
+
+async function handlePdfToWord() {
+  if (store.isPdfDocument && store.fileId) {
+    store.setLoading(true, '正在导出 PDF 并转换为 Word…')
+    try {
+      const pdfBlob = await store.getAnnotatedPdfBlob()
+      if (!pdfBlob) throw new Error('无法获取当前 PDF')
+      const pdfName = `${store.document?.title ?? 'export'}.pdf`
+      const file = new File([pdfBlob], pdfName, { type: 'application/pdf' })
+      await convertPdfFileToWord(file)
+    } catch (err: any) {
+      ElMessage.error(err.message || 'PDF 转 Word 失败')
+      store.setLoading(false)
+    }
+    return
+  }
+  pdfToWordInputRef.value?.click()
+}
+
+async function handlePdfToWordFile(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  if (!/\.pdf$/i.test(file.name)) {
+    ElMessage.warning('请选择 PDF 文件')
+    return
+  }
+  await convertPdfFileToWord(file)
 }
 
 function handleResetElement() {

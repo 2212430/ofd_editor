@@ -224,6 +224,17 @@ export const ofdApi = {
         return ensureBlobOk(res.data, res.headers['content-type'])
     },
 
+    /** PDF转Word（pdf2docx，大文档可能较慢） */
+    pdfToWord: async (file: File): Promise<Blob> => {
+        const form = new FormData()
+        form.append('file', file)
+        const res = await http.post('/pdf-to-word', form, {
+            responseType: 'blob',
+            timeout: 600_000,
+        })
+        return ensureBlobOk(res.data, res.headers['content-type'])
+    },
+
     /** PDF转OFD */
     fromPdf: async (file: File): Promise<Blob> => {
         const form = new FormData()
