@@ -86,10 +86,10 @@
         </div>
 
         <!-- 文本内容 -->
-        <template v-if="['TEXTBOX','STICKYNOTE'].includes(selectedAnnotation.type)">
+        <template v-if="['TEXTBOX','STICKYNOTE','REPLACE'].includes(selectedAnnotation.type)">
           <el-divider style="margin: 8px 0" />
           <div class="form-item">
-            <label>文本内容</label>
+            <label>{{ selectedAnnotation.type === 'REPLACE' ? '替换文本' : '文本内容' }}</label>
             <el-input
                 :model-value="selectedAnnotation?.content ?? ''"
                 type="textarea"

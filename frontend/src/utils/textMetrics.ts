@@ -84,9 +84,6 @@ export function resolveRenderedFontSizeMm(meta: TextLayoutMeta): number {
 
     if (meta.fontSizeOverridden) return fsMm
     if (isVertical && wMm > 0) return Math.min(fsMm, wMm * 0.92)
-    if (!hasNl && content.length <= 20 && hMm > 2 && (wMm <= 0 || hMm < wMm * 1.5)) {
-        return Math.min(hMm * 0.94, Math.max(fsMm, hMm * 0.56))
-    }
     return fsMm
 }
 

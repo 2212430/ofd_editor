@@ -15,8 +15,18 @@
 
         <!-- 加载遮罩 -->
         <div v-if="store.isLoading" class="loading-mask">
-          <div class="spinner"></div>
-          <span>{{ store.loadingText }}</span>
+          <div class="loading-panel">
+            <p class="loading-text">{{ store.loadingText }}</p>
+            <el-progress
+                :percentage="store.loadingProgress ?? 0"
+                :stroke-width="12"
+                striped
+                striped-flow
+                :duration="12"
+                class="loading-bar"
+            />
+            <span class="loading-percent">{{ store.loadingProgress ?? 0 }}%</span>
+          </div>
         </div>
 
         <!-- 编辑器 -->
@@ -539,25 +549,39 @@ async function handleWelcomePdf(e: Event) {
 .loading-mask {
   position: absolute;
   inset: 0;
-  background: rgba(255, 255, 255, .75);
+  background: rgba(255, 255, 255, .78);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.loading-panel {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  gap: 14px;
-  z-index: 100;
+  gap: 12px;
+  min-width: 320px;
+  max-width: 420px;
+  padding: 28px 32px;
+  background: #fff;
+  border-radius: 10px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, .12);
+}
+.loading-text {
+  margin: 0;
   font-size: 14px;
-  color: var(--text-2);
+  color: var(--text-1);
+  text-align: center;
+  line-height: 1.5;
 }
-.spinner {
-  width: 36px;
-  height: 36px;
-  border: 3px solid #eee;
-  border-top-color: var(--ribbon-accent);
-  border-radius: 50%;
-  animation: spin .8s linear infinite;
+.loading-bar {
+  width: 100%;
 }
-@keyframes spin { to { transform: rotate(360deg); } }
+.loading-percent {
+  font-size: 12px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
 
 .status-bar {
   display: flex;

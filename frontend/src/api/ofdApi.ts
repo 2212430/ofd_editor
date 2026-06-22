@@ -1,6 +1,7 @@
 import axios from 'axios'
 import type { DocumentData, AnnotationData, SignatureVerifyResult } from '@/types'
 import { unpackSplitPayload, type SplitPackedFile } from '@/utils/splitPayload'
+import { transferProgressConfig } from '@/utils/loadingProgress'
 
 // axios实例（常规接口 60s；大文件转换在单次请求里单独加长 timeout）
 const http = axios.create({
@@ -89,11 +90,36 @@ export async function writeBlobToSaveTarget(blob: Blob, target: SaveTarget): Pro
 /** 后端用 blob 返回错误正文时，把可读信息抛出来 */
 async function ensureBlobOk(data: Blob, contentType?: string): Promise<Blob> {
     const ct = (contentType ?? data.type ?? '').toLowerCase()
-    if (ct.includes('pdf') || ct.includes('ofd') || ct.includes('octet-stream')) {
+    const isBinaryOk =
+        ct.includes('pdf')
+        || ct.includes('ofd')
+        || ct.includes('octet-stream')
+        || ct.includes('wordprocessingml')
+        || ct.includes('msword')
+        || ct.includes('presentationml')
+        || ct.includes('text/plain')
+        || ct.includes('text/html')
+        || ct.includes('openxmlformats-officedocument')
+    if (isBinaryOk) {
         return data
     }
-    const text = await data.text()
-    throw new Error(text || '请求失败')
+    // 空体
+    if (data.size === 0) {
+        throw new Error('响应为空')
+    }
+    // 大体积响应体视为文件（避免误把 docx 当 JSON 文本解析）
+    if (data.size > 65536) {
+        return data
+    }
+    const looksLikeError =
+        ct.includes('json')
+        || ct.startsWith('text/')
+        || ct.includes('html')
+    if (looksLikeError) {
+        const text = await data.text()
+        throw new Error(text || '请求失败')
+    }
+    return data
 }
 
 /** 从 axios 错误响应中提取可读消息（含 blob 响应体） */
@@ -131,7 +157,10 @@ export const ofdApi = {
     parseOfd: async (file: File): Promise<DocumentData> => {
         const form = new FormData()
         form.append('file', file)
-        const res = await http.post<DocumentData>('/parse', form)
+        const res = await http.post<DocumentData>('/parse', form, {
+            timeout: 300_000,
+            ...transferProgressConfig('正在打开 OFD', 'json', file.size),
+        })
         return res.data
     },
 
@@ -144,6 +173,7 @@ export const ofdApi = {
         form.append('file', file)
         const res = await http.post<DocumentData>('/parse-pdf', form, {
             timeout: 300_000,
+            ...transferProgressConfig('正在打开 PDF', 'json', file.size),
         })
         return res.data
     },
@@ -220,6 +250,55 @@ export const ofdApi = {
         const res = await http.post('/to-pdf', form, {
             responseType: 'blob',
             timeout: 600_000,
+            ...transferProgressConfig('正在转换为 PDF'),
+        })
+        return ensureBlobOk(res.data, res.headers['content-type'])
+    },
+
+    /** OFD转Word（OFD→PDF→docx，大文档可能较慢） */
+    ofdToWord: async (file: File): Promise<Blob> => {
+        const form = new FormData()
+        form.append('file', file)
+        const res = await http.post('/ofd-to-word', form, {
+            responseType: 'blob',
+            timeout: 900_000,
+            ...transferProgressConfig('正在转换为 Word'),
+        })
+        return ensureBlobOk(res.data, res.headers['content-type'])
+    },
+
+    /** OFD转PPT（OFD→PDF→pptx，大文档可能较慢） */
+    ofdToPpt: async (file: File): Promise<Blob> => {
+        const form = new FormData()
+        form.append('file', file)
+        const res = await http.post('/ofd-to-ppt', form, {
+            responseType: 'blob',
+            timeout: 900_000,
+            ...transferProgressConfig('正在转换为 PPT'),
+        })
+        return ensureBlobOk(res.data, res.headers['content-type'])
+    },
+
+    /** OFD转纯文本（ofdrw TextExporter） */
+    ofdToText: async (file: File): Promise<Blob> => {
+        const form = new FormData()
+        form.append('file', file)
+        const res = await http.post('/ofd-to-text', form, {
+            responseType: 'blob',
+            timeout: 600_000,
+            ...transferProgressConfig('正在提取文本'),
+        })
+        return ensureBlobOk(res.data, res.headers['content-type'])
+    },
+
+    /** OFD转HTML（ofdrw HTMLExporter） */
+    ofdToHtml: async (file: File): Promise<Blob> => {
+        const form = new FormData()
+        form.append('file', file)
+        const res = await http.post('/ofd-to-html', form, {
+            responseType: 'blob',
+            timeout: 600_000,
+            ...transferProgressConfig('正在导出 HTML'),
         })
         return ensureBlobOk(res.data, res.headers['content-type'])
     },
@@ -231,17 +310,31 @@ export const ofdApi = {
         const res = await http.post('/pdf-to-word', form, {
             responseType: 'blob',
             timeout: 600_000,
+            ...transferProgressConfig('正在转换为 Word'),
         })
         return ensureBlobOk(res.data, res.headers['content-type'])
     },
 
-    /** PDF转OFD */
+    /** PDF转PPT（每页渲染为幻灯片图片，大文档可能较慢） */
+    pdfToPpt: async (file: File): Promise<Blob> => {
+        const form = new FormData()
+        form.append('file', file)
+        const res = await http.post('/pdf-to-ppt', form, {
+            responseType: 'blob',
+            timeout: 900_000,
+            ...transferProgressConfig('正在转换为 PPT'),
+        })
+        return ensureBlobOk(res.data, res.headers['content-type'])
+    },
+
+    /** PDF转OFD（ofdrw PDFConverter 矢量转换，大文档可能较慢） */
     fromPdf: async (file: File): Promise<Blob> => {
         const form = new FormData()
         form.append('file', file)
         const res = await http.post('/from-pdf', form, {
             responseType: 'blob',
             timeout: 600_000,
+            ...transferProgressConfig('正在转换为 OFD'),
         })
         return ensureBlobOk(res.data, res.headers['content-type'])
     },
@@ -251,6 +344,8 @@ export const ofdApi = {
         const res = await http.post('/save', doc, {
             responseType: 'blob',
             headers: { 'Content-Type': 'application/json' },
+            timeout: 600_000,
+            ...transferProgressConfig('正在保存 OFD'),
         })
         return res.data
     },
@@ -414,7 +509,9 @@ export const ofdApi = {
      */
     exportWithAnnotations: async (fileId: string): Promise<Blob> => {
         const res = await http.get(`/${fileId}/export`, {
-            responseType: 'blob'
+            responseType: 'blob',
+            timeout: 600_000,
+            ...transferProgressConfig('正在导出 OFD'),
         })
         return res.data
     },
@@ -436,6 +533,7 @@ export const ofdApi = {
             responseType: 'blob',
             timeout: 300_000,
             headers: { 'Content-Type': 'application/json' },
+            ...transferProgressConfig('正在导出 PDF'),
         })
         return res.data
     },

@@ -1942,7 +1942,7 @@ public class OfdRebuildService {
         return switch (ann.getType()) {
             case "STAMP"                                                         -> createStampElement(doc, ann, zipEntries, docPrefix);
             case "TEXTBOX", "STICKYNOTE"                                         -> createTextElement(doc, ann);
-            case "HIGHLIGHT", "UNDERLINE", "STRIKEOUT",
+            case "HIGHLIGHT", "UNDERLINE", "SQUIGGLY", "STRIKEOUT", "REPLACE",
                  "RECTANGLE", "CIRCLE", "ARROW", "FREEHAND"                     -> createPathElement(doc, ann);
             default -> {
                 log.warn("未知注释类型: {}，使用 PATH 兜底", ann.getType());
@@ -2009,9 +2009,49 @@ public class OfdRebuildService {
             abbrev.setTextContent(isNotBlank(ofdPath) ? ofdPath : ann.getPathPoints());
             el.appendChild(abbrev);
             el.setAttribute("PathPoints", ann.getPathPoints());
+        } else if ("SQUIGGLY".equals(ann.getType()) && ann.getWidth() != null && ann.getWidth() > 0) {
+            String json = squigglyPathPointsJson(ann.getWidth());
+            Element abbrev = doc.createElement("AbbreviatedData");
+            String ofdPath = annotationPathPointsToOfdPath(json, ann.getType());
+            abbrev.setTextContent(ofdPath);
+            el.appendChild(abbrev);
+            el.setAttribute("PathPoints", json);
+        }
+
+        if ("REPLACE".equals(ann.getType())) {
+            if (isNotBlank(ann.getContent())) {
+                el.setAttribute("Content", ann.getContent());
+            }
+            if (ann.getFontSize() != null) {
+                el.setAttribute("FontSize",
+                        String.format(Locale.ROOT, "%.3f", ann.getFontSize()));
+            }
+            if (isNotBlank(ann.getFontColor())) {
+                el.setAttribute("FontColor", ann.getFontColor());
+            }
         }
 
         return el;
+    }
+
+    private String squigglyPathPointsJson(double width) {
+        StringBuilder sb = new StringBuilder("[");
+        double amplitude = 0.6;
+        double period = 2.5;
+        double step = 0.5;
+        boolean first = true;
+        for (double px = 0; px <= width; px += step) {
+            if (!first) sb.append(",");
+            first = false;
+            double py = amplitude * Math.sin((px / period) * Math.PI * 2);
+            sb.append(String.format(Locale.ROOT, "[%.3f,%.3f]", px, py));
+        }
+        double endY = amplitude * Math.sin((width / period) * Math.PI * 2);
+        if (width > 0) {
+            sb.append(String.format(Locale.ROOT, ",[%.3f,%.3f]", width, endY));
+        }
+        sb.append("]");
+        return sb.toString();
     }
 
     private Element createTextElement(Document doc, AnnotationDTO ann) {

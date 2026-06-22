@@ -3,7 +3,13 @@
     <!-- 隐藏文件输入 -->
     <input ref="ofdInputRef" type="file" accept=".ofd" style="display:none" @change="handleOfdUpload" />
     <input ref="pdfInputRef" type="file" accept=".pdf" style="display:none" @change="handlePdfImport" />
+    <input ref="pdfToOfdInputRef" type="file" accept=".pdf" style="display:none" @change="handlePdfToOfdFile" />
     <input ref="pdfToWordInputRef" type="file" accept=".pdf" style="display:none" @change="handlePdfToWordFile" />
+    <input ref="ofdToWordInputRef" type="file" accept=".ofd" style="display:none" @change="handleOfdToWordFile" />
+    <input ref="pdfToPptInputRef" type="file" accept=".pdf" style="display:none" @change="handlePdfToPptFile" />
+    <input ref="ofdToPptInputRef" type="file" accept=".ofd" style="display:none" @change="handleOfdToPptFile" />
+    <input ref="ofdToTextInputRef" type="file" accept=".ofd" style="display:none" @change="handleOfdToTextFile" />
+    <input ref="ofdToHtmlInputRef" type="file" accept=".ofd" style="display:none" @change="handleOfdToHtmlFile" />
     <input ref="imageInputRef" type="file" accept="image/*" style="display:none" @change="handleImageImport" />
     <input ref="stampInputRef" type="file" accept="image/*" style="display:none" @change="handleStampImageSelect" />
 
@@ -97,8 +103,14 @@
           <RibbonButton label="下划线" :active="store.currentTool === 'UNDERLINE'" @click="store.setTool('UNDERLINE')">
             <template #icon><span class="mark-icon underline">U</span></template>
           </RibbonButton>
+          <RibbonButton label="波浪线" :active="store.currentTool === 'SQUIGGLY'" @click="store.setTool('SQUIGGLY')">
+            <template #icon><span class="mark-icon squiggly">U</span></template>
+          </RibbonButton>
           <RibbonButton label="删除线" :active="store.currentTool === 'STRIKEOUT'" @click="store.setTool('STRIKEOUT')">
             <template #icon><span class="mark-icon strike">S</span></template>
+          </RibbonButton>
+          <RibbonButton label="替换线" :active="store.currentTool === 'REPLACE'" @click="store.setTool('REPLACE')">
+            <template #icon><span class="mark-icon replace">R</span></template>
           </RibbonButton>
         </RibbonGroup>
         <RibbonSep />
@@ -118,7 +130,13 @@
         <RibbonSep />
         <RibbonGroup label="图章">
           <RibbonButton
-              label="导入图章"
+              label="图章库"
+              :icon="Medal"
+              :disabled="!store.document"
+              @click="stampDialogVisible = true"
+          />
+          <RibbonButton
+              label="导入图章/签名"
               :icon="Stamp"
               :active="store.currentTool === 'STAMP'"
               :disabled="!store.document"
@@ -288,15 +306,66 @@
 
       <!-- ===== 转换 ===== -->
       <template v-else-if="activeTab === 'convert'">
-        <RibbonGroup label="格式转换">
-          <RibbonButton label="PDF转OFD" :icon="Upload" @click="pdfInputRef?.click()" />
-          <RibbonButton label="OFD转PDF" :icon="Download" :disabled="!store.document" @click="handleExportPdf" />
+        <RibbonGroup label="OFD转换">
+          <RibbonButton
+              label="OFD转PDF"
+              :icon="Download"
+              :disabled="!store.document || store.isPdfDocument"
+              tooltip="将当前 OFD 导出为 PDF（矢量转换）"
+              @click="handleExportPdf"
+          />
+          <RibbonButton
+              label="OFD转Word"
+              :icon="Reading"
+              :disabled="store.isPdfDocument"
+              tooltip="一键将 OFD 转为 Word（.docx）。已打开 OFD 时含当前编辑与批注；也可选择本地 OFD 文件"
+              @click="handleOfdToWord"
+          />
+          <RibbonButton
+              label="OFD转PPT"
+              :icon="Monitor"
+              :disabled="store.isPdfDocument"
+              tooltip="一键将 OFD 转为 PowerPoint（.pptx）。流程：OFD→PDF→PPT；已打开 OFD 时含当前编辑与批注"
+              @click="handleOfdToPpt"
+          />
+          <RibbonButton
+              label="OFD转文本"
+              :icon="DocumentCopy"
+              :disabled="store.isPdfDocument"
+              tooltip="提取 OFD 文字为纯文本（ofdrw TextExporter）。扫描件/路径字可能无法提取"
+              @click="handleOfdToText"
+          />
+          <RibbonButton
+              label="OFD转HTML"
+              :icon="View"
+              :disabled="store.isPdfDocument"
+              tooltip="将 OFD 导出为 HTML 网页（ofdrw HTMLExporter，SVG 版式预览）"
+              @click="handleOfdToHtml"
+          />
+        </RibbonGroup>
+        <RibbonSep />
+        <RibbonGroup label="PDF转换">
+          <RibbonButton
+              label="PDF转OFD"
+              :icon="Upload"
+              tooltip="上传 PDF 并转为 OFD（ofdrw 矢量转换）；日常编辑 PDF 请用「文件→导入PDF」"
+              @click="pdfToOfdInputRef?.click()"
+          />
           <RibbonButton
               label="PDF转Word"
               :icon="Document"
-              tooltip="将 PDF 转为 Word（.docx）。OFD 可先「OFD转PDF」；已打开的原生 PDF 可直接转换当前文档（含批注）"
+              tooltip="将 PDF 转为 Word（.docx）。已打开的原生 PDF 可直接转换当前文档（含批注）；OFD 请用「OFD转Word」"
               @click="handlePdfToWord"
           />
+          <RibbonButton
+              label="PDF转PPT"
+              :icon="Monitor"
+              tooltip="将 PDF 转为 PowerPoint（.pptx）。已打开的原生 PDF 可直接转换当前文档（含批注）；OFD 请用「OFD转PPT」"
+              @click="handlePdfToPpt"
+          />
+        </RibbonGroup>
+        <RibbonSep />
+        <RibbonGroup label="合并拆分">
           <RibbonButton
               label="OFD合并"
               :icon="Files"
@@ -386,6 +455,7 @@
     <SignSealDialog v-model="signDialogVisible" />
     <WatermarkDialog v-model="watermarkDialogVisible" />
     <ExtractPagesDialog v-model="extractDialogVisible" />
+    <DefaultStampDialog v-model="stampDialogVisible" @picked="activeTab = 'comment'" />
   </div>
 </template>
 
@@ -398,7 +468,7 @@ import {
   ScaleToOriginal, ChatLineSquare, Memo, Pointer,
   Printer, FolderOpened, DocumentChecked, CopyDocument,
   InfoFilled, Rank, FullScreen, View, Expand, Crop,
-  Document, Reading, Sort, Picture, Files, PictureFilled,
+  Document, Reading, Sort, Picture, Files, PictureFilled, Monitor,
   Lock, Key, Stamp, Medal, QuestionFilled, Clock, Scissor,
   Search, DocumentCopy, CircleCheck,
 } from '@element-plus/icons-vue'
@@ -418,6 +488,7 @@ import ImageCropDialog from '@/components/ImageCropDialog.vue'
 import SignSealDialog from '@/components/SignSealDialog.vue'
 import WatermarkDialog from '@/components/WatermarkDialog.vue'
 import ExtractPagesDialog from '@/components/ExtractPagesDialog.vue'
+import DefaultStampDialog from '@/components/DefaultStampDialog.vue'
 
 const HandIcon = defineComponent({
   name: 'HandIcon',
@@ -442,7 +513,13 @@ const HandIcon = defineComponent({
 const store = useEditorStore()
 const ofdInputRef = ref<HTMLInputElement>()
 const pdfInputRef = ref<HTMLInputElement>()
+const pdfToOfdInputRef = ref<HTMLInputElement>()
 const pdfToWordInputRef = ref<HTMLInputElement>()
+const ofdToWordInputRef = ref<HTMLInputElement>()
+const pdfToPptInputRef = ref<HTMLInputElement>()
+const ofdToPptInputRef = ref<HTMLInputElement>()
+const ofdToTextInputRef = ref<HTMLInputElement>()
+const ofdToHtmlInputRef = ref<HTMLInputElement>()
 const imageInputRef = ref<HTMLInputElement>()
 const stampInputRef = ref<HTMLInputElement>()
 const docPropsVisible = ref(false)
@@ -453,6 +530,7 @@ const pdfSplitDialogVisible = ref(false)
 const signDialogVisible = ref(false)
 const watermarkDialogVisible = ref(false)
 const extractDialogVisible = ref(false)
+const stampDialogVisible = ref(false)
 const activeTab = ref('home')
 
 const canSplitOfd = computed(
@@ -546,9 +624,9 @@ function showHelp() {
       '2. 「主页」选择工具并编辑页面元素\n' +
       '3. Ctrl+Z 撤销、Ctrl+Y 或 Ctrl+Shift+Z 重做\n' +
       '4. 「编辑 → 插入」可导入图片到当前页\n' +
-      '5. 「注释 → 导入图章」选择图片后点击页面放置图章\n' +
+      '5. 「注释 → 图章库」选择内置图章，或「导入图章/签名」上传图片，再点击页面放置\n' +
       '6. 「注释」添加高亮、图形等批注\n' +
-      '7. 「转换」OFD↔PDF、PDF 转 Word；「文件 → 打印」输出纸质或 PDF',
+      '7. 「转换」OFD 转 PDF/Word/PPT/文本/HTML、PDF 转 OFD/Word/PPT；「文件 → 打印」输出纸质或 PDF',
       '快速上手',
       { confirmButtonText: '知道了' }
   )
@@ -556,7 +634,7 @@ function showHelp() {
 
 function showAbout() {
   ElMessageBox.alert(
-      'OFD Studio v1.0\n开放版式文档（OFD）编辑器\n\n支持：解析 · 编辑 · 批注 · PDF 双向转换 · PDF 转 Word · 打印',
+      'OFD Studio v1.0\n开放版式文档（OFD）编辑器\n\n支持：解析 · 编辑 · 批注 · PDF 双向转换 · OFD/PDF 转 Word/PPT/文本/HTML · 打印',
       '关于 OFD Studio',
       { confirmButtonText: '确定' }
   )
@@ -631,16 +709,16 @@ async function handleStampImageSelect(e: Event) {
     return
   }
   if (!file.type.startsWith('image/')) {
-    ElMessage.error('请选择图片格式的图章文件')
+    ElMessage.error('请选择图片格式的图章/签名文件')
     return
   }
   try {
     const dataUrl = await readFileAsDataUrl(file)
     store.setPendingStampImage(dataUrl)
     activeTab.value = 'comment'
-    ElMessage.success('已选择图章，请点击页面放置（可重复放置）')
+    ElMessage.success('已选择图章/签名，请点击页面放置（可重复放置）')
   } catch (err: any) {
-    ElMessage.error(err.message || '读取图章失败')
+    ElMessage.error(err.message || '读取图章/签名失败')
   } finally {
     ;(e.target as HTMLInputElement).value = ''
   }
@@ -689,7 +767,29 @@ async function handlePdfImport(e: Event) {
   }
 }
 
-/** 原生 PDF：先把批注烘焙回 PDF，再「PDF→图片→OFD」转换（不保留原矢量格式） */
+async function handlePdfToOfdFile(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  if (!/\.pdf$/i.test(file.name)) {
+    ElMessage.warning('请选择 PDF 文件')
+    return
+  }
+  store.setLoading(true, '正在转换为 OFD（矢量转换，页数较多时请耐心等待）...')
+  try {
+    const blob = await ofdApi.fromPdf(file)
+    const base = (file.name || 'export').replace(/\.pdf$/i, '').trim() || 'export'
+    downloadBlob(blob, `${base}.ofd`)
+    ElMessage.success('OFD 已开始下载')
+  } catch (err: any) {
+    ElMessage.error(err.message || 'PDF 转 OFD 失败')
+  } finally {
+    store.setLoading(false)
+  }
+}
+
+/** 原生 PDF：烘焙批注后，经 ofdrw PDFConverter 转为 OFD */
 async function buildOfdBlobFromPdf(): Promise<Blob> {
   const pdfBlob = await store.getAnnotatedPdfBlob()
   if (!pdfBlob) throw new Error('PDF 导出失败')
@@ -701,7 +801,7 @@ async function buildOfdBlobFromPdf(): Promise<Blob> {
 async function handleSaveOfd() {
   if (!store.document) return
   if (store.isPdfDocument) {
-    store.setLoading(true, '正在转换为 OFD...')
+    store.setLoading(true, '正在转换为 OFD（矢量转换）...')
     try {
       const blob = await buildOfdBlobFromPdf()
       downloadBlob(blob, `${store.document.title ?? 'export'}.ofd`)
@@ -776,6 +876,294 @@ async function handleExportPdf() {
 function docxFilenameFromPdfName(name: string): string {
   const base = (name || 'export').replace(/\.pdf$/i, '').trim() || 'export'
   return `${base}.docx`
+}
+
+function docxFilenameFromOfdName(name: string): string {
+  const base = (name || 'export').replace(/\.ofd$/i, '').trim() || 'export'
+  return `${base}.docx`
+}
+
+async function convertOfdFileToWord(file: File) {
+  store.setLoading(true, '正在转换为 Word（OFD→PDF→Word，请稍候）...')
+  try {
+    const blob = await ofdApi.ofdToWord(file)
+    downloadBlob(blob, docxFilenameFromOfdName(file.name))
+    ElMessage.success('Word 已开始下载')
+  } catch (err: any) {
+    ElMessage.error(err.message || 'OFD 转 Word 失败')
+  } finally {
+    store.setLoading(false)
+  }
+}
+
+async function handleOfdToWord() {
+  if (store.isPdfDocument) {
+    ElMessage.warning('当前为 PDF 文档，请使用「PDF转Word」')
+    return
+  }
+  if (store.document && !store.isPdfDocument) {
+    if (store.fileId && store.getDocumentForSave()) {
+      store.setLoading(true, '正在转换为 Word（OFD→PDF→Word，请稍候）...')
+      try {
+        const ofdBlob = await ofdApi.saveOfd(store.getDocumentForSave()!)
+        const ofdName = `${store.document.title ?? 'export'}.ofd`
+        const ofdFile = new File([ofdBlob], ofdName, { type: 'application/ofd' })
+        const blob = await ofdApi.ofdToWord(ofdFile)
+        downloadBlob(blob, docxFilenameFromOfdName(ofdName))
+        ElMessage.success('Word 已开始下载')
+      } catch (err: any) {
+        ElMessage.error(err.message || 'OFD 转 Word 失败')
+      } finally {
+        store.setLoading(false)
+      }
+      return
+    }
+    if (store.currentFile) {
+      await convertOfdFileToWord(store.currentFile)
+      return
+    }
+  }
+  ofdToWordInputRef.value?.click()
+}
+
+async function handleOfdToWordFile(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  if (!/\.ofd$/i.test(file.name)) {
+    ElMessage.warning('请选择 OFD 文件')
+    return
+  }
+  await convertOfdFileToWord(file)
+}
+
+function pptxFilenameFromOfdName(name: string): string {
+  const base = (name || 'export').replace(/\.ofd$/i, '').trim() || 'export'
+  return `${base}.pptx`
+}
+
+function pptxFilenameFromPdfName(name: string): string {
+  const base = (name || 'export').replace(/\.pdf$/i, '').trim() || 'export'
+  return `${base}.pptx`
+}
+
+async function convertOfdFileToPpt(file: File) {
+  store.setLoading(true, '正在转换为 PPT（OFD→PDF→PPT，请稍候）...')
+  try {
+    const blob = await ofdApi.ofdToPpt(file)
+    downloadBlob(blob, pptxFilenameFromOfdName(file.name))
+    ElMessage.success('PPT 已开始下载')
+  } catch (err: any) {
+    ElMessage.error(err.message || 'OFD 转 PPT 失败')
+  } finally {
+    store.setLoading(false)
+  }
+}
+
+async function handleOfdToPpt() {
+  if (store.isPdfDocument) {
+    ElMessage.warning('当前为 PDF 文档，请使用「PDF转PPT」')
+    return
+  }
+  if (store.document && !store.isPdfDocument) {
+    if (store.fileId && store.getDocumentForSave()) {
+      store.setLoading(true, '正在转换为 PPT（OFD→PDF→PPT，请稍候）...')
+      try {
+        const ofdBlob = await ofdApi.saveOfd(store.getDocumentForSave()!)
+        const ofdName = `${store.document.title ?? 'export'}.ofd`
+        const ofdFile = new File([ofdBlob], ofdName, { type: 'application/ofd' })
+        const blob = await ofdApi.ofdToPpt(ofdFile)
+        downloadBlob(blob, pptxFilenameFromOfdName(ofdName))
+        ElMessage.success('PPT 已开始下载')
+      } catch (err: any) {
+        ElMessage.error(err.message || 'OFD 转 PPT 失败')
+      } finally {
+        store.setLoading(false)
+      }
+      return
+    }
+    if (store.currentFile) {
+      await convertOfdFileToPpt(store.currentFile)
+      return
+    }
+  }
+  ofdToPptInputRef.value?.click()
+}
+
+async function handleOfdToPptFile(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  if (!/\.ofd$/i.test(file.name)) {
+    ElMessage.warning('请选择 OFD 文件')
+    return
+  }
+  await convertOfdFileToPpt(file)
+}
+
+function txtFilenameFromOfdName(name: string): string {
+  const base = (name || 'export').replace(/\.ofd$/i, '').trim() || 'export'
+  return `${base}.txt`
+}
+
+function htmlFilenameFromOfdName(name: string): string {
+  const base = (name || 'export').replace(/\.ofd$/i, '').trim() || 'export'
+  return `${base}.html`
+}
+
+async function convertOfdFileToText(file: File) {
+  store.setLoading(true, '正在提取文本（ofdrw TextExporter）...')
+  try {
+    const blob = await ofdApi.ofdToText(file)
+    downloadBlob(blob, txtFilenameFromOfdName(file.name))
+    ElMessage.success('文本文件已开始下载')
+  } catch (err: any) {
+    ElMessage.error(err.message || 'OFD 转文本失败')
+  } finally {
+    store.setLoading(false)
+  }
+}
+
+async function convertOfdFileToHtml(file: File) {
+  store.setLoading(true, '正在导出 HTML（ofdrw HTMLExporter）...')
+  try {
+    const blob = await ofdApi.ofdToHtml(file)
+    downloadBlob(blob, htmlFilenameFromOfdName(file.name))
+    ElMessage.success('HTML 文件已开始下载')
+  } catch (err: any) {
+    ElMessage.error(err.message || 'OFD 转 HTML 失败')
+  } finally {
+    store.setLoading(false)
+  }
+}
+
+async function handleOfdToText() {
+  if (store.isPdfDocument) {
+    ElMessage.warning('当前为 PDF 文档，无法直接转 OFD 文本')
+    return
+  }
+  if (store.document && !store.isPdfDocument) {
+    if (store.fileId && store.getDocumentForSave()) {
+      store.setLoading(true, '正在提取文本…')
+      try {
+        const ofdBlob = await ofdApi.saveOfd(store.getDocumentForSave()!)
+        const ofdName = `${store.document.title ?? 'export'}.ofd`
+        const ofdFile = new File([ofdBlob], ofdName, { type: 'application/ofd' })
+        const blob = await ofdApi.ofdToText(ofdFile)
+        downloadBlob(blob, txtFilenameFromOfdName(ofdName))
+        ElMessage.success('文本文件已开始下载')
+      } catch (err: any) {
+        ElMessage.error(err.message || 'OFD 转文本失败')
+      } finally {
+        store.setLoading(false)
+      }
+      return
+    }
+    if (store.currentFile) {
+      await convertOfdFileToText(store.currentFile)
+      return
+    }
+  }
+  ofdToTextInputRef.value?.click()
+}
+
+async function handleOfdToHtml() {
+  if (store.isPdfDocument) {
+    ElMessage.warning('当前为 PDF 文档，无法直接转 OFD HTML')
+    return
+  }
+  if (store.document && !store.isPdfDocument) {
+    if (store.fileId && store.getDocumentForSave()) {
+      store.setLoading(true, '正在导出 HTML…')
+      try {
+        const ofdBlob = await ofdApi.saveOfd(store.getDocumentForSave()!)
+        const ofdName = `${store.document.title ?? 'export'}.ofd`
+        const ofdFile = new File([ofdBlob], ofdName, { type: 'application/ofd' })
+        const blob = await ofdApi.ofdToHtml(ofdFile)
+        downloadBlob(blob, htmlFilenameFromOfdName(ofdName))
+        ElMessage.success('HTML 文件已开始下载')
+      } catch (err: any) {
+        ElMessage.error(err.message || 'OFD 转 HTML 失败')
+      } finally {
+        store.setLoading(false)
+      }
+      return
+    }
+    if (store.currentFile) {
+      await convertOfdFileToHtml(store.currentFile)
+      return
+    }
+  }
+  ofdToHtmlInputRef.value?.click()
+}
+
+async function handleOfdToTextFile(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  if (!/\.ofd$/i.test(file.name)) {
+    ElMessage.warning('请选择 OFD 文件')
+    return
+  }
+  await convertOfdFileToText(file)
+}
+
+async function handleOfdToHtmlFile(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  if (!/\.ofd$/i.test(file.name)) {
+    ElMessage.warning('请选择 OFD 文件')
+    return
+  }
+  await convertOfdFileToHtml(file)
+}
+
+async function convertPdfFileToPpt(file: File) {
+  store.setLoading(true, '正在转换为 PPT（请稍候）...')
+  try {
+    const blob = await ofdApi.pdfToPpt(file)
+    downloadBlob(blob, pptxFilenameFromPdfName(file.name))
+    ElMessage.success('PPT 已开始下载')
+  } catch (err: any) {
+    ElMessage.error(err.message || 'PDF 转 PPT 失败')
+  } finally {
+    store.setLoading(false)
+  }
+}
+
+async function handlePdfToPpt() {
+  if (store.isPdfDocument && store.fileId) {
+    store.setLoading(true, '正在导出 PDF 并转换为 PPT…')
+    try {
+      const pdfBlob = await store.getAnnotatedPdfBlob()
+      if (!pdfBlob) throw new Error('无法获取当前 PDF')
+      const pdfName = `${store.document?.title ?? 'export'}.pdf`
+      const file = new File([pdfBlob], pdfName, { type: 'application/pdf' })
+      await convertPdfFileToPpt(file)
+    } catch (err: any) {
+      ElMessage.error(err.message || 'PDF 转 PPT 失败')
+      store.setLoading(false)
+    }
+    return
+  }
+  pdfToPptInputRef.value?.click()
+}
+
+async function handlePdfToPptFile(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  if (!/\.pdf$/i.test(file.name)) {
+    ElMessage.warning('请选择 PDF 文件')
+    return
+  }
+  await convertPdfFileToPpt(file)
 }
 
 async function convertPdfFileToWord(file: File) {
@@ -1040,7 +1428,9 @@ async function handleDeletePage() {
 }
 .mark-icon.highlight { background: #ffe566; color: #333; }
 .mark-icon.underline { color: var(--ribbon-accent); text-decoration: underline; }
+.mark-icon.squiggly { color: var(--ribbon-accent); text-decoration: underline wavy; }
 .mark-icon.strike { color: #e74c3c; text-decoration: line-through; }
+.mark-icon.replace { color: #2980b9; text-decoration: line-through; font-style: italic; }
 .shape-icon.oval { font-size: 18px; color: var(--text-2); }
 
 .ribbon-placeholder {

@@ -25,3 +25,9 @@ ofd:
     python: python
     # script-path: D:/ofd-editor/backend/tools/pdf_to_docx.py
     timeout-seconds: 600
+  # PDF → PPT（PyMuPDF + python-pptx，需 pip install -r backend/requirements-pdf2pptx.txt）
+  pdf2pptx:
+    python: python
+    # script-path: D:/ofd-editor/backend/tools/pdf_to_pptx.py
+    timeout-seconds: 900
+    resolution-dpi: 150

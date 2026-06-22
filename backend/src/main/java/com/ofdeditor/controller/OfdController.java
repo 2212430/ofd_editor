@@ -15,6 +15,7 @@ import com.ofdeditor.service.OfdRebuildService;
 import com.ofdeditor.service.OfdSplitService;
 import com.ofdeditor.service.PdfMergeService;
 import com.ofdeditor.service.PdfNativeService;
+import com.ofdeditor.service.PdfToPptService;
 import com.ofdeditor.service.PdfToWordService;
 import com.ofdeditor.service.OfdPageService;
 import com.ofdeditor.service.OfdSignatureService;
@@ -45,6 +46,7 @@ public class OfdController {
     private final PdfNativeService pdfNativeService;
     private final ConversionService conversionService;
     private final PdfToWordService pdfToWordService;
+    private final PdfToPptService pdfToPptService;
     private final OfdRebuildService rebuildService;
     private final OfdCacheService cacheService;
     private final AnnotationService annotationService;
@@ -611,7 +613,35 @@ public class OfdController {
         }
     }
 
-    /** PDF 转 Word（.docx），底层使用 Python pdf2docx。OFD 可先「OFD转PDF」再调用本接口。 */
+    /** OFD 转 Word（.docx）：OFD→PDF（矢量）→ pdf2docx */
+    @PostMapping("/ofd-to-word")
+    public ResponseEntity<?> convertOfdToWord(@RequestParam("file") MultipartFile file) {
+        try {
+            if (file.isEmpty()) {
+                return ResponseEntity.badRequest().body("请选择 OFD 文件");
+            }
+            if (!isOfdFilename(file.getOriginalFilename())) {
+                return ResponseEntity.badRequest().body("请上传 OFD 格式文件");
+            }
+            byte[] docxBytes = conversionService.ofdToWord(file);
+            String filename = URLEncoder.encode(
+                    getNameWithoutExt(file.getOriginalFilename()) + ".docx",
+                    StandardCharsets.UTF_8);
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_TYPE,
+                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                    .header(HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename*=UTF-8''" + filename)
+                    .body(docxBytes);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(e.getMessage());
+        } catch (Exception e) {
+            log.error("OFD转Word失败: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body("转换失败: " + e.getMessage());
+        }
+    }
+
+    /** PDF 转 Word（.docx），底层使用 Python pdf2docx。OFD 请使用 /ofd-to-word。 */
     @PostMapping("/pdf-to-word")
     public ResponseEntity<?> convertPdfToWord(@RequestParam("file") MultipartFile file) {
         try {
@@ -639,6 +669,113 @@ public class OfdController {
         }
     }
 
+    /** OFD 转 PPT（.pptx）：OFD→PDF（矢量）→ 每页渲染为幻灯片 */
+    @PostMapping("/ofd-to-ppt")
+    public ResponseEntity<?> convertOfdToPpt(@RequestParam("file") MultipartFile file) {
+        try {
+            if (file.isEmpty()) {
+                return ResponseEntity.badRequest().body("请选择 OFD 文件");
+            }
+            if (!isOfdFilename(file.getOriginalFilename())) {
+                return ResponseEntity.badRequest().body("请上传 OFD 格式文件");
+            }
+            byte[] pptxBytes = conversionService.ofdToPpt(file);
+            String filename = URLEncoder.encode(
+                    getNameWithoutExt(file.getOriginalFilename()) + ".pptx",
+                    StandardCharsets.UTF_8);
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_TYPE,
+                            "application/vnd.openxmlformats-officedocument.presentationml.presentation")
+                    .header(HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename*=UTF-8''" + filename)
+                    .body(pptxBytes);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(e.getMessage());
+        } catch (Exception e) {
+            log.error("OFD转PPT失败: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body("转换失败: " + e.getMessage());
+        }
+    }
+
+    /** PDF 转 PPT（.pptx），底层使用 Python PyMuPDF + python-pptx。OFD 请使用 /ofd-to-ppt。 */
+    @PostMapping("/pdf-to-ppt")
+    public ResponseEntity<?> convertPdfToPpt(@RequestParam("file") MultipartFile file) {
+        try {
+            if (file.isEmpty()) {
+                return ResponseEntity.badRequest().body("请选择 PDF 文件");
+            }
+            if (!isPdfFilename(file.getOriginalFilename())) {
+                return ResponseEntity.badRequest().body("请上传 PDF 格式文件");
+            }
+            byte[] pptxBytes = pdfToPptService.convert(file);
+            String filename = URLEncoder.encode(
+                    getNameWithoutExt(file.getOriginalFilename()) + ".pptx",
+                    StandardCharsets.UTF_8);
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_TYPE,
+                            "application/vnd.openxmlformats-officedocument.presentationml.presentation")
+                    .header(HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename*=UTF-8''" + filename)
+                    .body(pptxBytes);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(e.getMessage());
+        } catch (Exception e) {
+            log.error("PDF转PPT失败: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body("转换失败: " + e.getMessage());
+        }
+    }
+
+    /** OFD 转 HTML（ofdrw HTMLExporter） */
+    @PostMapping("/ofd-to-html")
+    public ResponseEntity<?> convertOfdToHtml(@RequestParam("file") MultipartFile file) {
+        try {
+            if (file.isEmpty()) {
+                return ResponseEntity.badRequest().body("请选择 OFD 文件");
+            }
+            if (!isOfdFilename(file.getOriginalFilename())) {
+                return ResponseEntity.badRequest().body("请上传 OFD 格式文件");
+            }
+            byte[] htmlBytes = conversionService.ofdToHtml(file);
+            String filename = URLEncoder.encode(
+                    getNameWithoutExt(file.getOriginalFilename()) + ".html",
+                    StandardCharsets.UTF_8);
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_TYPE, "text/html; charset=UTF-8")
+                    .header(HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename*=UTF-8''" + filename)
+                    .body(htmlBytes);
+        } catch (Exception e) {
+            log.error("OFD转HTML失败: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body("转换失败: " + e.getMessage());
+        }
+    }
+
+    /** OFD 转纯文本（ofdrw TextExporter） */
+    @PostMapping("/ofd-to-text")
+    public ResponseEntity<?> convertOfdToText(@RequestParam("file") MultipartFile file) {
+        try {
+            if (file.isEmpty()) {
+                return ResponseEntity.badRequest().body("请选择 OFD 文件");
+            }
+            if (!isOfdFilename(file.getOriginalFilename())) {
+                return ResponseEntity.badRequest().body("请上传 OFD 格式文件");
+            }
+            byte[] textBytes = conversionService.ofdToText(file);
+            String filename = URLEncoder.encode(
+                    getNameWithoutExt(file.getOriginalFilename()) + ".txt",
+                    StandardCharsets.UTF_8);
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_TYPE, "text/plain; charset=UTF-8")
+                    .header(HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename*=UTF-8''" + filename)
+                    .body(textBytes);
+        } catch (Exception e) {
+            log.error("OFD转文本失败: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body("转换失败: " + e.getMessage());
+        }
+    }
+
+    /** PDF 转 OFD：ofdrw PDFConverter 矢量转换（Graphics2D 路径，可复制书签/附件） */
     @PostMapping("/from-pdf")
     public ResponseEntity<?> convertFromPdf(@RequestParam("file") MultipartFile file) {
         try {

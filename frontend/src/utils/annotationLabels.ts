@@ -3,7 +3,9 @@ import type { AnnotationData } from '@/types'
 export const ANNOTATION_TYPE_LABEL: Record<string, string> = {
     HIGHLIGHT: '高亮',
     UNDERLINE: '下划线',
+    SQUIGGLY: '波浪下划线',
     STRIKEOUT: '删除线',
+    REPLACE: '替换线',
     RECTANGLE: '矩形',
     CIRCLE: '椭圆',
     ARROW: '箭头',
@@ -19,7 +21,7 @@ export function annotationTypeLabel(type: string): string {
 
 export function annotationListTitle(ann: AnnotationData): string {
     const typeName = annotationTypeLabel(ann.type)
-    if (ann.type === 'TEXTBOX' || ann.type === 'STICKYNOTE') {
+    if (ann.type === 'TEXTBOX' || ann.type === 'STICKYNOTE' || ann.type === 'REPLACE') {
         const text = (ann.content ?? '').trim()
         if (text) {
             const short = text.length > 28 ? `${text.slice(0, 28)}…` : text

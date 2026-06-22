@@ -159,8 +159,22 @@ public class PdfNativeService {
                 dto.setOpacity(markupOpacity(ann, 0.4));
                 return dto;
             }
-            case "Underline":
             case "Squiggly": {
+                if (rect == null) return null;
+                applyRect(dto, tf, rect);
+                dto.setType("SQUIGGLY");
+                dto.setStrokeColor(markupColor(ann, "#000000"));
+                dto.setColor(dto.getStrokeColor());
+                dto.setLineWidth(lineWidthPx(ann, 2.0));
+                dto.setOpacity(markupOpacity(ann, 1.0));
+                double boxH = dto.getHeight() != null ? dto.getHeight() : 0.0;
+                double w = dto.getWidth() != null ? dto.getWidth() : 0.0;
+                dto.setY(dto.getY() + boxH);
+                dto.setHeight(0.0);
+                dto.setPathPoints(squigglyPathPointsJson(w));
+                return dto;
+            }
+            case "Underline": {
                 if (rect == null) return null;
                 applyRect(dto, tf, rect);
                 dto.setType("UNDERLINE");
@@ -699,6 +713,26 @@ public class PdfNativeService {
                         new float[]{1f, 0f, 0f}, lineWidthPt, opacity);
                 break;
             }
+            case "SQUIGGLY": {
+                drawSquiggly(doc, page, tf, ann, x, y, w, lineWidthPt, opacity);
+                break;
+            }
+            case "REPLACE": {
+                double ly = y;
+                strokeLine(doc, page, tf, x, ly, x + w, ly,
+                        firstNonNull(ann.getStrokeColor(), ann.getColor()),
+                        new float[]{1f, 0f, 0f}, lineWidthPt, opacity);
+                strokeLine(doc, page, tf, x, ly, x + 2, ly - 3,
+                        firstNonNull(ann.getStrokeColor(), ann.getColor()),
+                        new float[]{1f, 0f, 0f}, lineWidthPt, opacity);
+                strokeLine(doc, page, tf, x + 2, ly - 3, x + 4, ly,
+                        firstNonNull(ann.getStrokeColor(), ann.getColor()),
+                        new float[]{1f, 0f, 0f}, lineWidthPt, opacity);
+                if (ann.getContent() != null && !ann.getContent().isBlank()) {
+                    drawReplaceText(doc, page, tf, ann, x, ly, opacity);
+                }
+                break;
+            }
             case "ARROW": {
                 double[][] pts = parsePoints(ann.getPathPoints());
                 double[] start, end;
@@ -873,6 +907,70 @@ public class PdfNativeService {
         cs.curveTo(cx - kx, cy + ry, cx - rx, cy + ky, cx - rx, cy);
         cs.curveTo(cx - rx, cy - ky, cx - kx, cy - ry, cx, cy - ry);
         cs.curveTo(cx + kx, cy - ry, cx + rx, cy - ky, cx + rx, cy);
+    }
+
+    private void drawSquiggly(PDDocument doc, PDPage page, Transform tf,
+                            AnnotationDTO ann, double x, double y, double w,
+                            double lineWidthPt, double opacity) throws Exception {
+        double[][] pts = parsePoints(ann.getPathPoints());
+        if (pts.length < 2) {
+            pts = parsePoints(squigglyPathPointsJson(w));
+        }
+        try (PDPageContentStream cs = open(doc, page)) {
+            applyAlpha(doc, cs, opacity);
+            float[] c = rgb(firstNonNull(ann.getStrokeColor(), ann.getColor()), new float[]{0f, 0f, 0f});
+            cs.setStrokingColor(c[0], c[1], c[2]);
+            cs.setLineWidth((float) lineWidthPt);
+            cs.setLineCapStyle(1);
+            cs.setLineJoinStyle(1);
+            float[] p0 = tf.pt(x + pts[0][0], y + pts[0][1]);
+            cs.moveTo(p0[0], p0[1]);
+            for (int i = 1; i < pts.length; i++) {
+                float[] pi = tf.pt(x + pts[i][0], y + pts[i][1]);
+                cs.lineTo(pi[0], pi[1]);
+            }
+            cs.stroke();
+        }
+    }
+
+    private void drawReplaceText(PDDocument doc, PDPage page, Transform tf,
+                                 AnnotationDTO ann, double x, double ly, double opacity)
+            throws Exception {
+        org.apache.pdfbox.pdmodel.font.PDFont font = FontProvider.cjkFont(doc);
+        if (font == null) return;
+        float fontPt = (float) ((ann.getFontSize() != null ? ann.getFontSize() : 12.0) * MM_TO_PT);
+        float[] c = rgb(ann.getFontColor(), new float[]{0.12f, 0.51f, 0.73f});
+        double textY = ly - (ann.getFontSize() != null ? ann.getFontSize() : 12.0) * 1.2 - 2;
+        try (PDPageContentStream cs = open(doc, page)) {
+            applyAlpha(doc, cs, opacity);
+            cs.setNonStrokingColor(c[0], c[1], c[2]);
+            cs.beginText();
+            cs.setFont(font, fontPt);
+            float[] p = tf.pt(x, textY);
+            cs.setTextMatrix(tf.textMatrix(p[0], p[1]));
+            cs.showText(safe(font, ann.getContent()));
+            cs.endText();
+        }
+    }
+
+    private String squigglyPathPointsJson(double width) {
+        StringBuilder sb = new StringBuilder("[");
+        double amplitude = 0.6;
+        double period = 2.5;
+        double step = 0.5;
+        boolean first = true;
+        for (double px = 0; px <= width; px += step) {
+            if (!first) sb.append(",");
+            first = false;
+            double py = amplitude * Math.sin((px / period) * Math.PI * 2);
+            sb.append(String.format(java.util.Locale.ROOT, "[%.3f,%.3f]", px, py));
+        }
+        if (width > 0) {
+            double endY = amplitude * Math.sin((width / period) * Math.PI * 2);
+            sb.append(String.format(java.util.Locale.ROOT, ",[%.3f,%.3f]", width, endY));
+        }
+        sb.append("]");
+        return sb.toString();
     }
 
     private void strokeLine(PDDocument doc, PDPage page, Transform tf,

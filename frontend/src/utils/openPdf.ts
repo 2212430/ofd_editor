@@ -11,7 +11,6 @@ import { loadPdfDocument, releasePdfDocument } from '@/utils/pdfRender'
 export async function openNativePdf(file: File): Promise<void> {
     const store = useEditorStore()
 
-    // 释放上一个原生 PDF 文档，回收内存
     if (store.isPdfDocument && store.fileId) {
         void releasePdfDocument(store.fileId)
     }
@@ -20,8 +19,9 @@ export async function openNativePdf(file: File): Promise<void> {
     const doc = await ofdApi.parsePdfNative(file)
     if (!doc.fileId) throw new Error('后端未返回 fileId')
 
-    // 预加载到 PDF.js（供画布按页渲染）
+    store.setLoadingProgress(96, '正在初始化 PDF 渲染…')
     await loadPdfDocument(doc.fileId, buf)
+    store.setLoadingProgress(100, '加载完成')
 
     store.setDocument(doc, 'pdf')
     store.setCurrentFile(file, 'pdf')

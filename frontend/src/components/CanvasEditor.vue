@@ -127,6 +127,25 @@
               @dragend="(e: any) => handleAnnotationDragEnd(e, item.ann)"
               @transformend="(e: any) => handleAnnotationTransformEnd(e, item.ann)"
           />
+          <v-line
+              v-else-if="item.ann.type === 'SQUIGGLY'"
+              :config="item.squigglyCfg"
+              @click="handleAnnotationClick($event, item.ann.id)"
+              @dragend="(e: any) => handleAnnotationDragEnd(e, item.ann)"
+              @transformend="(e: any) => handleAnnotationTransformEnd(e, item.ann)"
+          />
+          <v-group
+              v-else-if="item.ann.type === 'REPLACE'"
+              :config="item.replaceGroupCfg"
+              @click="handleAnnotationClick($event, item.ann.id)"
+              @dblclick="handleAnnotationDblClick($event, item.ann.id)"
+              @dragend="(e: any) => handleAnnotationDragEnd(e, item.ann)"
+              @transformend="(e: any) => handleAnnotationTransformEnd(e, item.ann)"
+          >
+            <v-text :config="item.replaceTextCfg" />
+            <v-line :config="item.replaceStrikeCfg" />
+            <v-line :config="item.replaceCaretCfg" />
+          </v-group>
           <v-rect
               v-else-if="item.ann.type === 'RECTANGLE'"
               :config="item.rectangleCfg"
@@ -221,6 +240,14 @@
             v-else-if="drawTool === 'STRIKEOUT'"
             :config="previewStrikeoutConfig"
         />
+        <v-line
+            v-else-if="drawTool === 'SQUIGGLY'"
+            :config="previewSquigglyConfig"
+        />
+        <v-group v-else-if="drawTool === 'REPLACE'" :config="previewReplaceGroupConfig">
+          <v-line :config="previewReplaceStrikeConfig" />
+          <v-line :config="previewReplaceCaretConfig" />
+        </v-group>
       </v-layer>
 
       <!-- ============================================================
@@ -256,7 +283,7 @@
     <!-- 文本注释编辑弹窗 -->
     <el-dialog
         v-model="textEditVisible"
-        title="编辑注释文本"
+        :title="textEditMode === 'replace' ? '替换文本' : '编辑注释文本'"
         width="400px"
         :append-to-body="true"
         @close="cancelTextEdit"
@@ -265,7 +292,7 @@
           v-model="textEditContent"
           type="textarea"
           :rows="5"
-          placeholder="请输入注释内容..."
+          :placeholder="textEditMode === 'replace' ? '请输入替换后的文字...' : '请输入注释内容...'"
       />
       <template #footer>
         <el-button @click="cancelTextEdit">取消</el-button>
@@ -282,6 +309,7 @@ import { useEditorStore } from '@/stores/editorStore'
 import type { PageData, ElementData, AnnotationData } from '@/types'
 import { effectivePageSizeMm, konvaStageRotationConfig, normalizeViewRotation } from '@/utils/viewRotation'
 import { renderPdfPage, type PageTextItem } from '@/utils/pdfRender'
+import { buildSquigglyRelativePoints, relativePointsToKonva } from '@/utils/markupPath'
 
 // ─────────────────────────────────────────────
 // Props / Store
@@ -670,6 +698,11 @@ const annotationConfigs = computed(() =>
       highlightCfg:   ann.type === 'HIGHLIGHT'   ? getHighlightConfig(ann)   : null,
       underlineCfg:   ann.type === 'UNDERLINE'   ? getUnderlineConfig(ann)   : null,
       strikeoutCfg:   ann.type === 'STRIKEOUT'   ? getStrikeoutConfig(ann)   : null,
+      squigglyCfg:    ann.type === 'SQUIGGLY'    ? getSquigglyConfig(ann)    : null,
+      replaceGroupCfg: ann.type === 'REPLACE'    ? getReplaceGroupConfig(ann) : null,
+      replaceStrikeCfg: ann.type === 'REPLACE'   ? getReplaceStrikeConfig(ann) : null,
+      replaceCaretCfg: ann.type === 'REPLACE'    ? getReplaceCaretConfig(ann) : null,
+      replaceTextCfg:  ann.type === 'REPLACE'    ? getReplaceTextConfig(ann)  : null,
       rectangleCfg:   ann.type === 'RECTANGLE'   ? getRectangleConfig(ann)   : null,
       circleCfg:      ann.type === 'CIRCLE'      ? getCircleConfig(ann)      : null,
       arrowCfg:       ann.type === 'ARROW'       ? getArrowConfig(ann)       : null,
@@ -874,15 +907,55 @@ const previewStrikeoutConfig = computed(() => {
   }
 })
 
+const previewSquigglyConfig = computed(() => {
+  const x0 = Math.min(drawStartX.value, drawCurX.value)
+  const y0 = Math.max(drawStartY.value, drawCurY.value)
+  const w = Math.abs(drawCurX.value - drawStartX.value)
+  const pts = buildSquigglyRelativePoints(w, 0)
+  return {
+    points: relativePointsToKonva(x0, y0, pts, s),
+    stroke:      store.annotationColor,
+    strokeWidth: store.annotationLineWidth,
+    lineCap:     'round' as const,
+    lineJoin:    'round' as const,
+  }
+})
+
+const previewReplaceMidY = computed(() => (drawStartY.value + drawCurY.value) / 2)
+const previewReplaceX0 = computed(() => Math.min(drawStartX.value, drawCurX.value))
+const previewReplaceWidth = computed(() => Math.abs(drawCurX.value - drawStartX.value))
+
+const previewReplaceGroupConfig = computed(() => ({
+  x: s(previewReplaceX0.value),
+  y: s(previewReplaceMidY.value),
+}))
+
+const previewReplaceStrikeConfig = computed(() => ({
+  points: [0, 0, s(previewReplaceWidth.value), 0],
+  stroke:      store.annotationColor,
+  strokeWidth: store.annotationLineWidth,
+}))
+
+const previewReplaceCaretConfig = computed(() => ({
+  points: [0, 0, s(2), s(-3), s(4), 0],
+  stroke:      store.annotationColor,
+  strokeWidth: store.annotationLineWidth,
+  lineCap:     'round' as const,
+  lineJoin:    'round' as const,
+}))
+
 // ─────────────────────────────────────────────
 // 文本注释编辑弹窗
 // ─────────────────────────────────────────────
 const textEditVisible  = ref(false)
 const textEditContent  = ref('')
 const textEditTargetId = ref<string | null>(null)
+const textEditMode     = ref<'textbox' | 'replace'>('textbox')
 let pendingTextAnn: Omit<AnnotationData, 'id' | 'createdAt' | 'updatedAt'> | null = null
+let pendingReplaceAnn: Omit<AnnotationData, 'id' | 'createdAt' | 'updatedAt'> | null = null
 
-function openTextEdit(ann?: AnnotationData) {
+function openTextEdit(ann?: AnnotationData, mode: 'textbox' | 'replace' = 'textbox') {
+  textEditMode.value = mode
   if (ann) {
     textEditTargetId.value = ann.id
     textEditContent.value  = ann.content ?? ''
@@ -895,9 +968,20 @@ function openTextEdit(ann?: AnnotationData) {
 
 async function confirmTextEdit() {
   const text = textEditContent.value.trim()
-  if (!text) { ElMessage.warning('注释内容不能为空'); return }
+  if (!text) {
+    ElMessage.warning(textEditMode.value === 'replace' ? '替换文本不能为空' : '注释内容不能为空')
+    return
+  }
   if (textEditTargetId.value) {
     await store.updateAnnotation(textEditTargetId.value, { content: text })
+  } else if (pendingReplaceAnn) {
+    const result = await store.addAnnotation({ ...pendingReplaceAnn, content: text })
+    pendingReplaceAnn = null
+    if (result) {
+      ElMessage.success({ message: '注释已添加', duration: 1200, showClose: false })
+    } else {
+      ElMessage.error('注释保存失败，请检查后端连接')
+    }
   } else if (pendingTextAnn) {
     await store.addAnnotation({ ...pendingTextAnn, content: text })
     pendingTextAnn = null
@@ -907,6 +991,7 @@ async function confirmTextEdit() {
 
 function cancelTextEdit() {
   pendingTextAnn        = null
+  pendingReplaceAnn     = null
   textEditVisible.value = false
 }
 
@@ -1020,6 +1105,28 @@ async function handleMouseUp() {
   const height = Math.abs(pos.y - drawStartY.value)
   if (drawTool.value !== 'FREEHAND' && width < 1 && height < 1) return
   if (drawTool.value === 'FREEHAND' && drawingPoints.value.length < 6) return
+
+  if (drawTool.value === 'REPLACE') {
+    const midY = y + height / 2
+    pendingReplaceAnn = {
+      type:        'REPLACE',
+      pageIndex:   props.pageIndex,
+      x,
+      y:           midY,
+      width,
+      height:      0,
+      opacity:     store.annotationOpacity,
+      color:       store.annotationColor,
+      strokeColor: store.annotationColor,
+      lineWidth:   store.annotationLineWidth,
+      fontSize:    12,
+      fontColor:   '#2980b9',
+      pathPoints:  [[0, 0], [width, 0]],
+    }
+    openTextEdit(undefined, 'replace')
+    return
+  }
+
   await commitAnnotation(drawTool.value, x, y, width, height)
 }
 
@@ -1066,7 +1173,7 @@ function handleStageClick(e: any) {
   if (store.currentTool === 'STAMP') {
     const stampSrc = store.pendingStampImage
     if (!stampSrc) {
-      ElMessage.warning('请先在注释栏点击「导入图章」选择图片')
+      ElMessage.warning('请先在「图章库」或「导入图章/签名」中选择图章/签名')
       return
     }
     void placeStampAt(pos.x, pos.y, stampSrc)
@@ -1136,7 +1243,9 @@ function handleAnnotationClick(e: any, id: string) {
 function handleAnnotationDblClick(e: any, id: string) {
   e.cancelBubble = true
   const ann = pageAnnotations.value.find(a => a.id === id)
-  if (ann && ['TEXTBOX', 'STICKYNOTE'].includes(ann.type)) openTextEdit(ann)
+  if (ann && ['TEXTBOX', 'STICKYNOTE', 'REPLACE'].includes(ann.type)) {
+    openTextEdit(ann, ann.type === 'REPLACE' ? 'replace' : 'textbox')
+  }
 }
 
 // ─────────────────────────────────────────────
@@ -1179,7 +1288,7 @@ async function handleAnnotationDragEnd(e: any, ann: AnnotationData) {
     // 重置回圆心坐标
     node.x(s(newX) + s((ann.width  ?? 0) / 2))
     node.y(s(newY) + s((ann.height ?? 0) / 2))
-  } else if (['UNDERLINE', 'STRIKEOUT', 'ARROW', 'FREEHAND'].includes(ann.type)) {
+  } else if (['UNDERLINE', 'STRIKEOUT', 'SQUIGGLY', 'ARROW', 'FREEHAND'].includes(ann.type)) {
     // 这些节点渲染时 x=0/y=0，拖动后的 x/y 就是位移
     const dx = px2mm(node.x())
     const dy = px2mm(node.y())
@@ -1314,6 +1423,13 @@ async function commitAnnotation(
     case 'STRIKEOUT':
       base.height = 0
       break
+    case 'SQUIGGLY': {
+      const squigglyY = y + height
+      base.y = squigglyY
+      base.height = 0
+      base.pathPoints = buildSquigglyRelativePoints(width, 0)
+      break
+    }
     case 'ARROW':
       // 保留真实起点和终点，避免把起点固定成包围盒左上角导致方向失真
       // x/y 仍使用包围盒左上角，pathPoints 存相对该锚点的两端点
@@ -1487,9 +1603,6 @@ function resolveTextFontPx(element: ElementData): number {
   let fsPx = fsMm * MM_TO_PX * renderScale.value
   const userOverride = element.fontSizeOverridden === true
   if (isVertical && !userOverride && wPx > 0) fsPx = Math.min(fsPx, wPx * 0.92)
-  else if (!userOverride && !hasNl && content.length <= 20 && hPx > 2 && (wPx <= 0 || hPx < wPx * 1.5)) {
-    fsPx = Math.min(hPx * 0.94, Math.max(fsPx, hPx * 0.56))
-  }
   return fsPx
 }
 
@@ -1564,9 +1677,6 @@ function getTextConfig(element: ElementData) {
   if (isVertical && !userOverride) {
     // 竖排：字号上限取列宽（避免溢出到隔壁列）
     if (wPx > 0) fsPx = Math.min(fsPx, wPx * 0.92)
-  } else if (!userOverride && !hasNl && content.length <= 20 && hPx > 2 && (wPx <= 0 || hPx < wPx * 1.5)) {
-    /** 横向短标签：ofdrw 字号偶发偏小，用外接框高度抬到可读下限；长串（如密码区）不抬 */
-    fsPx = Math.min(hPx * 0.94, Math.max(fsPx, hPx * 0.56))
   }
 
   // 仅金额类文本按 OFD DeltaX 补字距（¥ 与数字）；销售方等普通字段不拉伸
@@ -1843,6 +1953,71 @@ function getStrikeoutConfig(ann: AnnotationData) {
     opacity:     ann.opacity     ?? 1,
     listening:   true,
     draggable:   annDraggable(),
+  }
+}
+
+function getSquigglyConfig(ann: AnnotationData) {
+  const pts = ann.pathPoints ?? buildSquigglyRelativePoints(ann.width ?? 0, 0)
+  return {
+    name:        ann.id,
+    points:      relativePointsToKonva(ann.x, ann.y, pts, s),
+    stroke:      ann.strokeColor ?? ann.color ?? '#000000',
+    strokeWidth: ann.lineWidth   ?? 2,
+    lineCap:     'round' as const,
+    lineJoin:    'round' as const,
+    opacity:     ann.opacity     ?? 1,
+    listening:   true,
+    draggable:   annDraggable(),
+  }
+}
+
+function replaceTextOffsetMm(ann: AnnotationData): number {
+  return (ann.fontSize ?? 12) * 1.2 + 2
+}
+
+function getReplaceGroupConfig(ann: AnnotationData) {
+  const offset = replaceTextOffsetMm(ann)
+  return {
+    name:      ann.id,
+    x:         s(ann.x),
+    y:         s(ann.y - offset),
+    opacity:   ann.opacity ?? 1,
+    listening: true,
+    draggable: annDraggable(),
+  }
+}
+
+function getReplaceTextConfig(ann: AnnotationData) {
+  return {
+    text:       ann.content ?? '',
+    x:          0,
+    y:          0,
+    fontSize:   (ann.fontSize ?? 12) * MM_TO_PX * renderScale.value,
+    fontFamily: 'Microsoft YaHei, sans-serif',
+    fill:       ann.fontColor ?? '#2980b9',
+    listening:  false,
+  }
+}
+
+function getReplaceStrikeConfig(ann: AnnotationData) {
+  const offset = s(replaceTextOffsetMm(ann))
+  return {
+    points:      [0, offset, s(ann.width), offset],
+    stroke:      ann.strokeColor ?? ann.color ?? '#FF0000',
+    strokeWidth: ann.lineWidth   ?? 2,
+    listening:   false,
+  }
+}
+
+function getReplaceCaretConfig(ann: AnnotationData) {
+  const offset = s(replaceTextOffsetMm(ann))
+  return {
+    points:      [0, offset, s(2), offset - s(3), s(4), offset],
+    stroke:      ann.strokeColor ?? ann.color ?? '#FF0000',
+    strokeWidth: ann.lineWidth   ?? 2,
+    lineCap:     'round' as const,
+    lineJoin:    'round' as const,
+    listening:   false,
   }
 }
 

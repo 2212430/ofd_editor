@@ -18,6 +18,7 @@ import {
     computeElementBoundsAfterCrop,
     type CropRect,
 } from '@/utils/imageCrop'
+import { registerProgressReporter, stopTransferProgress } from '@/utils/loadingProgress'
 
 /** 撤销栈条目：文档 + 注释 + 当前页，一步回退完整编辑状态 */
 interface HistoryEntry {
@@ -38,6 +39,8 @@ export const useEditorStore = defineStore('editor', () => {
     const scale = ref(1.0)
     const isLoading = ref(false)
     const loadingText = ref('处理中...')
+    /** 0–100 为确定进度；null 表示服务器处理中（不确定进度） */
+    const loadingProgress = ref<number | null>(null)
     const currentFile = ref<File | null>(null)
     const documentSource = ref<DocumentSource | null>(null)
     /** 当前文档的真实承载格式：ofd（含 PDF→OFD 老路径）或 pdf（原生 PDF.js 渲染） */
@@ -819,9 +822,20 @@ export const useEditorStore = defineStore('editor', () => {
     }
 
     function setLoading(val: boolean, text = '处理中...') {
+        if (!val) stopTransferProgress()
         isLoading.value = val
         loadingText.value = text
+        loadingProgress.value = val ? 0 : null
     }
+
+    function setLoadingProgress(percent: number | null, text?: string) {
+        loadingProgress.value = percent
+        if (text !== undefined) loadingText.value = text
+    }
+
+    registerProgressReporter((percent, text) => {
+        setLoadingProgress(percent, text)
+    })
 
     /**
      * 对 IMAGE 元素应用像素级裁剪，并同步缩小外框尺寸（mm）。
@@ -1557,7 +1571,7 @@ export const useEditorStore = defineStore('editor', () => {
     return {
         // ── 原有状态 ──
         document, currentPageIndex, pageViewMode, viewRotation, selectedElementId,
-        scale, isLoading, loadingText, currentFile, documentSource, documentKind,
+        scale, isLoading, loadingText, loadingProgress, currentFile, documentSource, documentKind,
         history, historyIndex, fileId, renderVersion,
         printDialogVisible,
         imageCropDialogVisible,
@@ -1586,7 +1600,7 @@ export const useEditorStore = defineStore('editor', () => {
         rotateCurrentPagePersist,
         setWatermarkConfig, watermarkConfig,
         extractPagesAsBlob,
-        registerEditorAreaResolver, setLoading,
+        registerEditorAreaResolver, setLoading, setLoadingProgress,
         updateElement, resetElement, deleteElement, deleteSelectedElement,
         importImageToPage, applyImageCrop,
         canCropSelectedImage, openImageCropDialog,

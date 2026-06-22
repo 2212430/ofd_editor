@@ -4,7 +4,9 @@ export type OfdElementType = 'TEXT' | 'IMAGE' | 'PATH' | 'SEAL' | 'OTHER'
 export type AnnotationType =
     | 'HIGHLIGHT'    // 高亮
     | 'UNDERLINE'    // 下划线
+    | 'SQUIGGLY'     // 波浪下划线
     | 'STRIKEOUT'    // 删除线
+    | 'REPLACE'      // 替换线
     | 'TEXTBOX'      // 文本框
     | 'STICKYNOTE'   // 便利贴
     | 'ARROW'        // 箭头
@@ -19,7 +21,9 @@ export type ToolType =
     | 'HAND'         // 手型/浏览（平移，不可选中）
     | 'HIGHLIGHT'
     | 'UNDERLINE'
+    | 'SQUIGGLY'
     | 'STRIKEOUT'
+    | 'REPLACE'
     | 'TEXTBOX'
     | 'STICKYNOTE'
     | 'ARROW'
@@ -99,12 +103,12 @@ export interface AnnotationData {
     strokeColor?: string     // 边框色
     lineWidth?: number       // 线宽
 
-    // 文本相关（TEXTBOX / STICKYNOTE）
+    // 文本相关（TEXTBOX / STICKYNOTE / REPLACE）
     content?: string
     fontSize?: number
     fontColor?: string
 
-    // 手绘相关（FREEHAND）
+    // 手绘 / 波浪下划线 / 替换线
     pathPoints?: [number, number][]
 
     // 图章相关（STAMP）

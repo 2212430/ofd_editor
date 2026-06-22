@@ -436,6 +436,15 @@ public class OfdParseService {
                     dto.setType("FREEHAND");             // 兜底
                 }
 
+                if ("REPLACE".equals(dto.getType())) {
+                    String content = firstNonBlank(el.getAttribute("Content"), el.getAttribute("content"));
+                    if (isNotBlank(content)) dto.setContent(content.trim());
+                    Double fs = tryParseDouble(el.getAttribute("FontSize"));
+                    if (fs != null) dto.setFontSize(fs);
+                    String fc = firstNonBlank(el.getAttribute("FontColor"), el.getAttribute("fontColor"));
+                    if (isNotBlank(fc)) dto.setFontColor(fc.trim());
+                }
+
                 list.add(dto);
             }
 
@@ -780,6 +789,17 @@ public class OfdParseService {
             if (isNotBlank(raw)) info.abbrevData = raw.trim();
         }
         info.ctmStr = firstNonBlank(el.getAttribute("CTM"), el.getAttribute("ctm"));
+        ElementDTO paintProbe = new ElementDTO();
+        applyOfdPathStrokeFillFromAttributes(el, paintProbe);
+        info.pathFillEnabled = paintProbe.getPathFillEnabled();
+        info.pathStrokeEnabled = paintProbe.getPathStrokeEnabled();
+        info.fillColor = extractPathFillColorHexFromElement(el);
+        info.strokeColor = extractPathStrokeColorHexFromElement(el);
+        String lineWidthAttr = el.getAttribute("LineWidth");
+        if (isNotBlank(lineWidthAttr)) {
+            Double lw = tryParseDouble(lineWidthAttr);
+            if (lw != null && lw > 0) info.lineWidth = lw;
+        }
         ctx.pathDomByObjectIdPage.put(oid.trim(), info);
     }
 
@@ -796,6 +816,16 @@ public class OfdParseService {
         if (isNotBlank(dom.abbrevData)) {
             Matrix ctm = parseCTMString(dom.ctmStr);
             dto.setPathData(convertOfdPathToSvg(dom.abbrevData, dom.x, dom.y, ctm));
+        }
+        if (dom.pathFillEnabled != null) dto.setPathFillEnabled(dom.pathFillEnabled);
+        if (dom.pathStrokeEnabled != null) dto.setPathStrokeEnabled(dom.pathStrokeEnabled);
+        if (isNotBlank(dom.fillColor)) dto.setFillColor(dom.fillColor);
+        if (isNotBlank(dom.strokeColor)) dto.setStrokeColor(dom.strokeColor);
+        if (dom.lineWidth != null && dom.lineWidth > 0) dto.setLineWidth(dom.lineWidth);
+        if (Boolean.FALSE.equals(dto.getPathFillEnabled())) dto.setFillColor(null);
+        if (Boolean.FALSE.equals(dto.getPathStrokeEnabled())) {
+            dto.setStrokeColor(null);
+            dto.setLineWidth(0.0);
         }
     }
 
@@ -869,7 +899,6 @@ public class OfdParseService {
             if (isNotBlank(dom.content)) dto.setContent(dom.content);
             if (dom.verticalLayout != null) dto.setVerticalLayout(dom.verticalLayout);
             if (dom.passwordGrid != null) dto.setPasswordGrid(dom.passwordGrid);
-            if (dom.fontSize != null && dom.fontSize > 0) dto.setFontSize(dom.fontSize);
         } else {
             double bx = dom.boundaryX != null ? dom.boundaryX : (dto.getX() != null ? dto.getX() : 0.0);
             double by = dom.boundaryY != null ? dom.boundaryY : (dto.getY() != null ? dto.getY() : 0.0);
@@ -901,6 +930,10 @@ public class OfdParseService {
         if (dom.glyphAdvanceMm != null && dom.glyphAdvanceMm > 0
                 && isCurrencyLikeContent(dto.getContent())) {
             dto.setGlyphAdvanceMm(dom.glyphAdvanceMm);
+        }
+        // XML Size×CTM 为字号权威来源（ofdrw getSize 偶发与 Boundary 不一致）
+        if (dom.fontSize != null && dom.fontSize > 0) {
+            dto.setFontSize(dom.fontSize);
         }
     }
 
@@ -1251,6 +1284,32 @@ public class OfdParseService {
 
     /** 文本对象上的填充色：优先 FillColor 子树，其次属性 {@code FillColor}，再次 DefaultAppearance。 */
     private String extractTextFillColorHexFromElement(Element el) {
+        return extractFillColorHexFromElement(el, true);
+    }
+
+    /** PathObject 填充色：FillColor 子树 / 属性。 */
+    private String extractPathFillColorHexFromElement(Element el) {
+        return extractFillColorHexFromElement(el, false);
+    }
+
+    /** PathObject 描边色：StrokeColor 子树 / 属性。 */
+    private String extractPathStrokeColorHexFromElement(Element el) {
+        if (el == null) return null;
+        NodeList strokeNodes = el.getElementsByTagNameNS("*", "StrokeColor");
+        if (strokeNodes.getLength() == 0) strokeNodes = el.getElementsByTagName("StrokeColor");
+        if (strokeNodes.getLength() > 0 && strokeNodes.item(0) instanceof Element strokeEl) {
+            String h = paintColorHexFromElement(strokeEl);
+            if (isNotBlank(h)) return h;
+        }
+        String strokeAttr = firstNonBlank(el.getAttribute("StrokeColor"), el.getAttribute("strokeColor"));
+        if (isNotBlank(strokeAttr)) {
+            String p = parseRgbString(strokeAttr, null);
+            if (isNotBlank(p)) return p;
+        }
+        return null;
+    }
+
+    private String extractFillColorHexFromElement(Element el, boolean includeDefaultAppearance) {
         if (el == null) return null;
         NodeList fillNodes = el.getElementsByTagNameNS("*", "FillColor");
         if (fillNodes.getLength() == 0) fillNodes = el.getElementsByTagName("FillColor");
@@ -1258,11 +1317,12 @@ public class OfdParseService {
             String h = paintColorHexFromElement(fillEl);
             if (isNotBlank(h)) return h;
         }
-        String fillAttr = el.getAttribute("FillColor");
+        String fillAttr = firstNonBlank(el.getAttribute("FillColor"), el.getAttribute("fillColor"));
         if (isNotBlank(fillAttr)) {
             String p = parseRgbString(fillAttr, null);
             if (isNotBlank(p)) return p;
         }
+        if (!includeDefaultAppearance) return null;
         NodeList daNodes = el.getElementsByTagNameNS("*", "DefaultAppearance");
         if (daNodes.getLength() == 0) daNodes = el.getElementsByTagName("DefaultAppearance");
         if (daNodes.getLength() > 0 && daNodes.item(0) instanceof Element daEl) {
@@ -1550,17 +1610,13 @@ public class OfdParseService {
             dto.setScaleX(1.0);
             dto.setScaleY(1.0);
             dto.setIsDirty(false);
+            applyOfdPathStrokeFillFromAttributes(pathElem, dto);
 
-            NodeList fillNodes = pathElem.getElementsByTagNameNS("*", "FillColor");
-            if (fillNodes.getLength() == 0) fillNodes = pathElem.getElementsByTagName("FillColor");
-            if (fillNodes.getLength() > 0 && fillNodes.item(0) instanceof Element) {
-                dto.setFillColor(parseRgbString(((Element) fillNodes.item(0)).getAttribute("Value"), null));
+            if (!Boolean.FALSE.equals(dto.getPathFillEnabled())) {
+                dto.setFillColor(extractPathFillColorHexFromElement(pathElem));
             }
-
-            NodeList strokeNodes = pathElem.getElementsByTagNameNS("*", "StrokeColor");
-            if (strokeNodes.getLength() == 0) strokeNodes = pathElem.getElementsByTagName("StrokeColor");
-            if (strokeNodes.getLength() > 0 && strokeNodes.item(0) instanceof Element) {
-                dto.setStrokeColor(parseRgbString(((Element) strokeNodes.item(0)).getAttribute("Value"), "#222222"));
+            if (!Boolean.FALSE.equals(dto.getPathStrokeEnabled())) {
+                dto.setStrokeColor(extractPathStrokeColorHexFromElement(pathElem));
             }
 
             dto.setOriginalX(dto.getX());
@@ -1947,22 +2003,12 @@ public class OfdParseService {
             }
         }
 
-        // 填充色
+        // 填充色 / 描边色（含 FillColor/StrokeColor 子结点 Color、渐变 Segment）
         if (!Boolean.FALSE.equals(dto.getPathFillEnabled())) {
-            NodeList fillNodes = el.getElementsByTagNameNS("*", "FillColor");
-            if (fillNodes.getLength() == 0) fillNodes = el.getElementsByTagName("FillColor");
-            if (fillNodes.getLength() > 0 && fillNodes.item(0) instanceof Element fillEl) {
-                dto.setFillColor(parseRgbString(fillEl.getAttribute("Value"), null));
-            }
+            dto.setFillColor(extractPathFillColorHexFromElement(el));
         }
-
-        // 描边色
         if (!Boolean.FALSE.equals(dto.getPathStrokeEnabled())) {
-            NodeList strokeNodes = el.getElementsByTagNameNS("*", "StrokeColor");
-            if (strokeNodes.getLength() == 0) strokeNodes = el.getElementsByTagName("StrokeColor");
-            if (strokeNodes.getLength() > 0 && strokeNodes.item(0) instanceof Element strokeEl) {
-                dto.setStrokeColor(parseRgbString(strokeEl.getAttribute("Value"), null));
-            }
+            dto.setStrokeColor(extractPathStrokeColorHexFromElement(el));
         }
 
         // 线宽
@@ -2314,16 +2360,6 @@ public class OfdParseService {
                 if (fallback != null) content = String.valueOf(fallback);
             }
 
-            // 字号兜底：短标签才用 Boundary 高度抬字号；密码区等长串若按外接框抬大会严重偏大
-            if (!verticalLayout
-                    && !content.contains("\n")
-                    && content.length() <= 20
-                    && finalRect != null && finalRect.h != null && finalRect.h > 0.1
-                    && finalRect.w != null && finalRect.w > 0
-                    && finalRect.h < finalRect.w * 1.5) {
-                double hBased = finalRect.h * 0.78;
-                if (corrected < hBased * 0.6) corrected = hBased;
-            }
             dto.setFontSize(corrected);
             dto.setContent(content);
             dto.setVerticalLayout(verticalLayout ? Boolean.TRUE : null);
@@ -3318,6 +3354,11 @@ public class OfdParseService {
         Double x, y, w, h;
         String abbrevData;
         String ctmStr;
+        String fillColor;
+        String strokeColor;
+        Boolean pathFillEnabled;
+        Boolean pathStrokeEnabled;
+        Double lineWidth;
     }
 
     private static class TextObjectDomInfo {
