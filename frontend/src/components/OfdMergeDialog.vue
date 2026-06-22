@@ -81,6 +81,7 @@ import { ElMessage } from 'element-plus'
 import { Close, Document, Files, FolderOpened } from '@element-plus/icons-vue'
 import { useEditorStore } from '@/stores/editorStore'
 import { ofdApi } from '@/api/ofdApi'
+import { confirmDiscardUnsavedChanges } from '@/composables/useUnsavedChangesGuard'
 
 const MAX_FILES = 2
 
@@ -151,6 +152,8 @@ function removeAttachment(index: number) {
 
 async function handleMerge() {
   if (attachments.value.length !== MAX_FILES) return
+  if (!await confirmDiscardUnsavedChanges('合并并打开新文档')) return
+
   const [first, second] = attachments.value.map((a) => a.file)
 
   merging.value = true

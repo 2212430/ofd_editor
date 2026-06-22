@@ -83,7 +83,7 @@ public class OfdController {
             OfdDocumentDTO result = parseService.parseOfd(file);
             result.setFileId(fileId);
 
-            // ✅ 解析OFD内已有的Annotation层，初始化到注释缓存
+            //  解析OFD内已有的Annotation层，初始化到注释缓存
             try {
                 Map<Integer, List<AnnotationDTO>> existingAnnotations =
                         parseService.parseAnnotations(fileBytes);
@@ -515,6 +515,108 @@ public class OfdController {
         } catch (Exception e) {
             log.error("删除整页注释失败: {}", e.getMessage(), e);
             return ResponseEntity.internalServerError().body("删除失败: " + e.getMessage());
+        }
+    }
+
+    // ==================== 注释讨论回复（会话缓存，不写入 OFD） ====================
+
+    /**
+     * 获取某文件全部讨论回复
+     * GET /api/ofd/{fileId}/annotation-replies/all
+     */
+    @GetMapping("/{fileId}/annotation-replies/all")
+    public ResponseEntity<?> getAllAnnotationReplies(@PathVariable("fileId") String fileId) {
+        try {
+            return ResponseEntity.ok(annotationService.getAllReplies(fileId));
+        } catch (Exception e) {
+            log.error("获取讨论回复失败: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body("获取讨论回复失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 获取某条注释的讨论回复
+     * GET /api/ofd/{fileId}/annotations/{annotationId}/replies
+     */
+    @GetMapping("/{fileId}/annotations/{annotationId}/replies")
+    public ResponseEntity<?> getAnnotationReplies(
+            @PathVariable("fileId") String fileId,
+            @PathVariable("annotationId") String annotationId) {
+        try {
+            return ResponseEntity.ok(annotationService.getReplies(fileId, annotationId));
+        } catch (Exception e) {
+            log.error("获取讨论回复失败: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body("获取讨论回复失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 新增讨论回复
+     * POST /api/ofd/{fileId}/annotations/{annotationId}/replies
+     */
+    @PostMapping("/{fileId}/annotations/{annotationId}/replies")
+    public ResponseEntity<?> addAnnotationReply(
+            @PathVariable("fileId") String fileId,
+            @PathVariable("annotationId") String annotationId,
+            @RequestBody com.ofdeditor.dto.AnnotationReplyDTO reply) {
+        try {
+            return ResponseEntity.ok(annotationService.addReply(fileId, annotationId, reply));
+        } catch (Exception e) {
+            log.error("新增讨论回复失败: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body("新增讨论回复失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 更新讨论回复
+     * PUT /api/ofd/{fileId}/annotations/{annotationId}/replies/{replyId}
+     */
+    @PutMapping("/{fileId}/annotations/{annotationId}/replies/{replyId}")
+    public ResponseEntity<?> updateAnnotationReply(
+            @PathVariable("fileId") String fileId,
+            @PathVariable("annotationId") String annotationId,
+            @PathVariable("replyId") String replyId,
+            @RequestBody com.ofdeditor.dto.AnnotationReplyDTO reply) {
+        try {
+            return ResponseEntity.ok(annotationService.updateReply(fileId, annotationId, replyId, reply));
+        } catch (Exception e) {
+            log.error("更新讨论回复失败: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body("更新讨论回复失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 删除讨论回复
+     * DELETE /api/ofd/{fileId}/annotations/{annotationId}/replies/{replyId}
+     */
+    @DeleteMapping("/{fileId}/annotations/{annotationId}/replies/{replyId}")
+    public ResponseEntity<?> deleteAnnotationReply(
+            @PathVariable("fileId") String fileId,
+            @PathVariable("annotationId") String annotationId,
+            @PathVariable("replyId") String replyId) {
+        try {
+            annotationService.deleteReply(fileId, annotationId, replyId);
+            return ResponseEntity.ok("删除成功");
+        } catch (Exception e) {
+            log.error("删除讨论回复失败: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body("删除讨论回复失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 全量同步讨论回复（撤销/重做后重建 annotationId 映射）
+     * PUT /api/ofd/{fileId}/annotation-replies/sync
+     */
+    @PutMapping("/{fileId}/annotation-replies/sync")
+    public ResponseEntity<?> syncAnnotationReplies(
+            @PathVariable("fileId") String fileId,
+            @RequestBody Map<String, List<com.ofdeditor.dto.AnnotationReplyDTO>> allReplies) {
+        try {
+            annotationService.syncAllReplies(fileId, allReplies);
+            return ResponseEntity.ok("同步成功");
+        } catch (Exception e) {
+            log.error("同步讨论回复失败: {}", e.getMessage(), e);
+            return ResponseEntity.internalServerError().body("同步讨论回复失败: " + e.getMessage());
         }
     }
 

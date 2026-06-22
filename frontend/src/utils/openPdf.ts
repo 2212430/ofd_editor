@@ -6,10 +6,15 @@
  */
 import { useEditorStore } from '@/stores/editorStore'
 import { ofdApi } from '@/api/ofdApi'
+import { confirmDiscardUnsavedChanges } from '@/composables/useUnsavedChangesGuard'
 import { loadPdfDocument, releasePdfDocument } from '@/utils/pdfRender'
 
 export async function openNativePdf(file: File): Promise<void> {
     const store = useEditorStore()
+
+    if (!await confirmDiscardUnsavedChanges('打开新 PDF')) {
+        return
+    }
 
     if (store.isPdfDocument && store.fileId) {
         void releasePdfDocument(store.fileId)

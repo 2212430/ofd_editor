@@ -31,7 +31,9 @@
         {{ tab.label }}
       </button>
       <div class="ribbon-tabs-spacer" />
-      <span v-if="store.document" class="ribbon-doc-title">{{ store.document.title }}</span>
+      <span v-if="store.document" class="ribbon-doc-title">
+        {{ store.document.title }}<span v-if="store.hasUnsavedChanges" class="unsaved-mark"> *</span>
+      </span>
     </nav>
 
     <!-- Ribbon 面板 -->
@@ -39,8 +41,8 @@
       <!-- ===== 文件 ===== -->
       <template v-if="activeTab === 'file'">
         <RibbonGroup label="打开">
-          <RibbonButton label="打开OFD" :icon="FolderOpened" @click="ofdInputRef?.click()" />
-          <RibbonButton label="导入PDF" :icon="Upload" @click="pdfInputRef?.click()" />
+          <RibbonButton label="打开OFD" :icon="FolderOpened" @click="pickOpenOfd" />
+          <RibbonButton label="导入PDF" :icon="Upload" @click="pickOpenPdf" />
         </RibbonGroup>
         <RibbonSep />
         <RibbonGroup label="保存">
@@ -128,6 +130,17 @@
           <RibbonButton label="便利贴" :icon="Memo" :active="store.currentTool === 'STICKYNOTE'" @click="store.setTool('STICKYNOTE')" />
         </RibbonGroup>
         <RibbonSep />
+        <RibbonGroup label="链接">
+          <RibbonButton
+              label="链接"
+              :icon="LinkIcon"
+              :active="store.currentTool === 'LINK'"
+              :disabled="!store.document"
+              tooltip="绘制矩形热区，跳转到页或打开网址"
+              @click="store.setTool('LINK')"
+          />
+        </RibbonGroup>
+        <RibbonSep />
         <RibbonGroup label="图章">
           <RibbonButton
               label="图章库"
@@ -178,6 +191,13 @@
               :disabled="!store.document"
               tooltip="打开右侧注释列表面板"
               @click="store.openAnnotationListPanel()"
+          />
+          <RibbonButton
+              label="汇总报告"
+              :icon="Files"
+              :disabled="!store.document || store.annotationCount === 0"
+              tooltip="生成注释汇总报告（可导出 HTML / CSV / 打印）"
+              @click="annotationReportVisible = true"
           />
           <RibbonButton label="全部显示" :icon="View" disabled tooltip="批量显示/隐藏即将推出" @click="comingSoon" />
         </RibbonGroup>
@@ -456,6 +476,7 @@
     <WatermarkDialog v-model="watermarkDialogVisible" />
     <ExtractPagesDialog v-model="extractDialogVisible" />
     <DefaultStampDialog v-model="stampDialogVisible" @picked="activeTab = 'comment'" />
+    <AnnotationReportDialog v-model="annotationReportVisible" />
   </div>
 </template>
 
@@ -470,9 +491,11 @@ import {
   InfoFilled, Rank, FullScreen, View, Expand, Crop,
   Document, Reading, Sort, Picture, Files, PictureFilled, Monitor,
   Lock, Key, Stamp, Medal, QuestionFilled, Clock, Scissor,
-  Search, DocumentCopy, CircleCheck,
+  Search, DocumentCopy, CircleCheck, Link as LinkIcon,
 } from '@element-plus/icons-vue'
 import { useEditorStore } from '@/stores/editorStore'
+import { buildOfdBlobFromPdf, saveDocument } from '@/composables/useDocumentFileActions'
+import { confirmDiscardUnsavedChanges } from '@/composables/useUnsavedChangesGuard'
 import {
   ofdApi, downloadBlob,
   pickOfdSaveTarget, writeBlobToSaveTarget,
@@ -489,6 +512,7 @@ import SignSealDialog from '@/components/SignSealDialog.vue'
 import WatermarkDialog from '@/components/WatermarkDialog.vue'
 import ExtractPagesDialog from '@/components/ExtractPagesDialog.vue'
 import DefaultStampDialog from '@/components/DefaultStampDialog.vue'
+import AnnotationReportDialog from '@/components/AnnotationReportDialog.vue'
 
 const HandIcon = defineComponent({
   name: 'HandIcon',
@@ -531,6 +555,7 @@ const signDialogVisible = ref(false)
 const watermarkDialogVisible = ref(false)
 const extractDialogVisible = ref(false)
 const stampDialogVisible = ref(false)
+const annotationReportVisible = ref(false)
 const activeTab = ref('home')
 
 const canSplitOfd = computed(
@@ -620,13 +645,17 @@ function showDocumentProperties() {
 
 function showHelp() {
   ElMessageBox.alert(
-      '1. 「文件」打开 OFD 或导入 PDF\n' +
+      '1. 「文件」打开 OFD 或导入 PDF（Ctrl+O 打开 OFD）\n' +
       '2. 「主页」选择工具并编辑页面元素\n' +
       '3. Ctrl+Z 撤销、Ctrl+Y 或 Ctrl+Shift+Z 重做\n' +
-      '4. 「编辑 → 插入」可导入图片到当前页\n' +
-      '5. 「注释 → 图章库」选择内置图章，或「导入图章/签名」上传图片，再点击页面放置\n' +
-      '6. 「注释」添加高亮、图形等批注\n' +
-      '7. 「转换」OFD 转 PDF/Word/PPT/文本/HTML、PDF 转 OFD/Word/PPT；「文件 → 打印」输出纸质或 PDF',
+      '4. Ctrl+S 保存、Ctrl+P 打印、Ctrl+F 搜索\n' +
+      '5. Ctrl+±0 缩放，PageUp/PageDown 翻页，Esc 逐级退出\n' +
+      '6. Delete 删除选中注释或元素\n' +
+      '7. 「编辑 → 插入」可导入图片到当前页\n' +
+      '8. 「注释 → 图章库」选择内置图章，或「导入图章/签名」上传图片，再点击页面放置\n' +
+      '9. 「注释 → 汇总报告」导出全部批注统计与明细（HTML / CSV / 打印）\n' +
+      '10. 「注释」添加高亮、图形等批注\n' +
+      '11. 「转换」OFD 转 PDF/Word/PPT/文本/HTML、PDF 转 OFD/Word/PPT；「文件 → 打印」输出纸质或 PDF',
       '快速上手',
       { confirmButtonText: '知道了' }
   )
@@ -683,9 +712,21 @@ async function handleDeleteAnnotation() {
   ElMessage.success('注释已删除')
 }
 
+async function pickOpenOfd() {
+  ofdInputRef.value?.click()
+}
+
+async function pickOpenPdf() {
+  pdfInputRef.value?.click()
+}
+
 async function handleOfdUpload(e: Event) {
   const file = (e.target as HTMLInputElement).files?.[0]
   if (!file) return
+  if (!await confirmDiscardUnsavedChanges('打开新文件')) {
+    ;(e.target as HTMLInputElement).value = ''
+    return
+  }
   store.setLoading(true, '正在解析OFD文件...')
   try {
     const doc = await ofdApi.parseOfd(file)
@@ -790,40 +831,8 @@ async function handlePdfToOfdFile(e: Event) {
 }
 
 /** 原生 PDF：烘焙批注后，经 ofdrw PDFConverter 转为 OFD */
-async function buildOfdBlobFromPdf(): Promise<Blob> {
-  const pdfBlob = await store.getAnnotatedPdfBlob()
-  if (!pdfBlob) throw new Error('PDF 导出失败')
-  const baseName = store.document?.title ?? 'export'
-  const pdfFile = new File([pdfBlob], `${baseName}.pdf`, { type: 'application/pdf' })
-  return ofdApi.fromPdf(pdfFile)
-}
-
 async function handleSaveOfd() {
-  if (!store.document) return
-  if (store.isPdfDocument) {
-    store.setLoading(true, '正在转换为 OFD（矢量转换）...')
-    try {
-      const blob = await buildOfdBlobFromPdf()
-      downloadBlob(blob, `${store.document.title ?? 'export'}.ofd`)
-      ElMessage.success('已保存为 OFD')
-    } catch (err: any) {
-      ElMessage.error(err.message || '保存失败')
-    } finally {
-      store.setLoading(false)
-    }
-    return
-  }
-  store.setLoading(true, '正在保存...')
-  try {
-    const blob = await ofdApi.saveOfd(store.getDocumentForSave()!)
-    downloadBlob(blob, `${store.document.title}.ofd`)
-    store.markNewElementsPersisted()
-    ElMessage.success('保存成功！')
-  } catch (err: any) {
-    ElMessage.error(err.message || '保存失败')
-  } finally {
-    store.setLoading(false)
-  }
+  await saveDocument()
 }
 
 async function handleSaveAs() {
@@ -839,6 +848,7 @@ async function handleSaveAs() {
       : await ofdApi.saveOfd(store.getDocumentForSave()!)
     await writeBlobToSaveTarget(blob, target)
     store.markNewElementsPersisted()
+    store.markDocumentSaved()
     ElMessage.success(`已另存为：${target.filename}`)
   } catch (err: any) {
     ElMessage.error(err.message || '另存为失败')
@@ -1347,6 +1357,11 @@ async function handleDeletePage() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.unsaved-mark {
+  color: #e6a23c;
+  font-weight: 700;
 }
 
 /* ---- Ribbon 面板 ---- */

@@ -2,7 +2,7 @@ import { defineStore, acceptHMRUpdate } from 'pinia'
 import { ref, computed, reactive, nextTick } from 'vue'
 import type {
     DocumentData, ElementData, PageData,
-    AnnotationData, AnnotationType, ToolType, DocumentSource, PageViewMode, WatermarkConfig,
+    AnnotationData, AnnotationReplyData, AnnotationType, ToolType, DocumentSource, PageViewMode, WatermarkConfig,
 } from '@/types'
 import { ofdApi } from '@/api/ofdApi'
 import { getPdfPageTextItems, type PageTextItem } from '@/utils/pdfRender'
@@ -19,11 +19,16 @@ import {
     type CropRect,
 } from '@/utils/imageCrop'
 import { registerProgressReporter, stopTransferProgress } from '@/utils/loadingProgress'
+import { executeLinkAction as runLinkAction } from '@/utils/linkAction'
+import {
+    loadDiscussionAuthor, remapRepliesByFingerprint, saveDiscussionAuthor,
+} from '@/utils/annotationDiscussion'
 
-/** 撤销栈条目：文档 + 注释 + 当前页，一步回退完整编辑状态 */
+/** 撤销栈条目：文档 + 注释 + 讨论 + 当前页 */
 interface HistoryEntry {
     document: DocumentData
     annotations: Record<number, AnnotationData[]>
+    annotationReplies: Record<string, AnnotationReplyData[]>
     currentPageIndex: number
 }
 
@@ -209,6 +214,11 @@ export const useEditorStore = defineStore('editor', () => {
     // ✅ 改用 reactive Record，Vue 能完整追踪增删改
     const annotationsMap = reactive<Record<number, AnnotationData[]>>({})
 
+    /** annotationId -> 讨论回复（会话缓存，不写入 OFD） */
+    const annotationRepliesMap = reactive<Record<string, AnnotationReplyData[]>>({})
+
+    const discussionAuthor = ref(loadDiscussionAuthor())
+
     const selectedAnnotationId = ref<string | null>(null)
     /** 右侧面板：属性 / 注释列表 */
     const rightPanelTab = ref<'properties' | 'annotations'>('properties')
@@ -252,6 +262,10 @@ export const useEditorStore = defineStore('editor', () => {
 
     const canUndo = computed(() => historyIndex.value > 0)
     const canRedo = computed(() => historyIndex.value < history.value.length - 1)
+    /** 自上次加载/保存以来是否有可撤销的编辑（含注释、讨论、页面结构等） */
+    const hasUnsavedChanges = computed(
+        () => !!document.value && historyIndex.value > 0,
+    )
 
     // ✅ 直接访问 reactive 对象的属性，Vue 能追踪
     const currentPageAnnotations = computed<AnnotationData[]>(() =>
@@ -488,6 +502,7 @@ export const useEditorStore = defineStore('editor', () => {
         searchQuery.value = ''
         viewRotation.value = 0
         resetHistory()
+        clearAnnotationRepliesMap()
         void nextTick(() => { fitToWidth() })
     }
 
@@ -1130,6 +1145,15 @@ export const useEditorStore = defineStore('editor', () => {
         return out
     }
 
+    function cloneRepliesForHistory(): Record<string, AnnotationReplyData[]> {
+        const out: Record<string, AnnotationReplyData[]> = {}
+        for (const key of Object.keys(annotationRepliesMap)) {
+            const list = annotationRepliesMap[key]
+            if (list?.length) out[key] = JSON.parse(JSON.stringify(list))
+        }
+        return out
+    }
+
     function applyAnnotationsMap(source: Record<number, AnnotationData[]>) {
         for (const key of Object.keys(annotationsMap)) {
             delete annotationsMap[Number(key)]
@@ -1139,10 +1163,46 @@ export const useEditorStore = defineStore('editor', () => {
         }
     }
 
+    function clearAnnotationRepliesMap() {
+        for (const key of Object.keys(annotationRepliesMap)) {
+            delete annotationRepliesMap[key]
+        }
+    }
+
+    function applyRepliesMap(source: Record<string, AnnotationReplyData[]>) {
+        clearAnnotationRepliesMap()
+        for (const [k, v] of Object.entries(source)) {
+            if (v?.length) annotationRepliesMap[k] = JSON.parse(JSON.stringify(v))
+        }
+    }
+
+    function flatAnnotations(): AnnotationData[] {
+        const out: AnnotationData[] = []
+        for (const key of Object.keys(annotationsMap)) {
+            out.push(...(annotationsMap[Number(key)] ?? []))
+        }
+        return out
+    }
+
+    function getReplyCount(annotationId: string): number {
+        return annotationRepliesMap[annotationId]?.length ?? 0
+    }
+
+    function getRepliesForAnnotation(annotationId: string): AnnotationReplyData[] {
+        return annotationRepliesMap[annotationId] ?? []
+    }
+
+    function setDiscussionAuthor(name: string) {
+        const v = name.trim() || '用户'
+        discussionAuthor.value = v
+        saveDiscussionAuthor(v)
+    }
+
     function captureHistoryEntry(): HistoryEntry {
         return {
             document: JSON.parse(JSON.stringify(document.value!)),
             annotations: cloneAnnotationsForHistory(),
+            annotationReplies: cloneRepliesForHistory(),
             currentPageIndex: currentPageIndex.value,
         }
     }
@@ -1157,6 +1217,11 @@ export const useEditorStore = defineStore('editor', () => {
         if (!document.value) return
         history.value = [captureHistoryEntry()]
         historyIndex.value = 0
+    }
+
+    /** 保存成功后调用，清除「未保存」状态 */
+    function markDocumentSaved() {
+        commitHistoryBaseline()
     }
 
     function saveToHistory() {
@@ -1175,6 +1240,9 @@ export const useEditorStore = defineStore('editor', () => {
         if (!fileId.value || historySyncInProgress) return
         historySyncInProgress = true
         try {
+            const oldFlat = flatAnnotations()
+            const oldReplies = cloneRepliesForHistory()
+
             const serverAll = await ofdApi.getAllAnnotations(fileId.value)
             for (const list of Object.values(serverAll)) {
                 for (const ann of list) {
@@ -1198,9 +1266,16 @@ export const useEditorStore = defineStore('editor', () => {
                 }
             }
             applyAnnotationsMap(rebuilt)
+
+            const newFlat = flatAnnotations()
+            const remapped = remapRepliesByFingerprint(oldFlat, newFlat, oldReplies)
+            applyRepliesMap(remapped)
+            await ofdApi.syncAnnotationReplies(fileId.value, remapped)
+
             const current = history.value[historyIndex.value]
             if (current) {
                 current.annotations = cloneAnnotationsForHistory()
+                current.annotationReplies = cloneRepliesForHistory()
             }
         } catch (e) {
             console.error('[editorStore] 撤销后注释同步失败:', e)
@@ -1262,6 +1337,7 @@ export const useEditorStore = defineStore('editor', () => {
             applyInPlace(document.value, entry.document)
         }
         applyAnnotationsMap(entry.annotations)
+        applyRepliesMap(entry.annotationReplies ?? {})
         const maxPage = Math.max(0, (document.value?.pageCount ?? 1) - 1)
         currentPageIndex.value = Math.min(Math.max(0, entry.currentPageIndex), maxPage)
         selectedElementId.value = null
@@ -1358,7 +1434,10 @@ export const useEditorStore = defineStore('editor', () => {
 
     function selectAnnotation(id: string | null) {
         selectedAnnotationId.value = id
-        if (id) selectedElementId.value = null
+        if (id) {
+            selectedElementId.value = null
+            rightPanelTab.value = 'properties'
+        }
     }
 
     function openAnnotationListPanel() {
@@ -1373,7 +1452,7 @@ export const useEditorStore = defineStore('editor', () => {
             setCurrentPage(pageIdx, { scrollIntoView: true })
             setTool('SELECT')
             selectAnnotation(annotationId)
-            rightPanelTab.value = 'annotations'
+            rightPanelTab.value = 'properties'
             return
         }
     }
@@ -1401,6 +1480,7 @@ export const useEditorStore = defineStore('editor', () => {
                 annotationsMap[pageIdx] = []
             }
             annotationsMap[pageIdx].push(saved)
+            renderVersion.value++
             schedulePageThumbnailRefresh(pageIdx, 400)
             saveToHistory()
             return saved
@@ -1469,6 +1549,7 @@ export const useEditorStore = defineStore('editor', () => {
             if (selectedAnnotationId.value === annotationId) {
                 selectedAnnotationId.value = null
             }
+            delete annotationRepliesMap[annotationId]
             if (affectedPageIndex !== null) {
                 schedulePageThumbnailRefresh(affectedPageIndex, 400)
             }
@@ -1478,6 +1559,14 @@ export const useEditorStore = defineStore('editor', () => {
             console.error('[editorStore] 删除注释失败:', e)
             return false
         }
+    }
+
+    function executeLinkAction(ann: AnnotationData): boolean {
+        const pageCount = document.value?.pageCount ?? 0
+        return runLinkAction(ann, {
+            pageCount,
+            goToPage: (index) => setCurrentPage(index, { scrollIntoView: true }),
+        })
     }
 
     async function loadAllAnnotations(): Promise<void> {
@@ -1491,6 +1580,13 @@ export const useEditorStore = defineStore('editor', () => {
             for (const [pageIdx, list] of Object.entries(all)) {
                 annotationsMap[Number(pageIdx)] = list
             }
+            clearAnnotationRepliesMap()
+            try {
+                const replies = await ofdApi.getAllAnnotationReplies(fileId.value)
+                applyRepliesMap(replies ?? {})
+            } catch {
+                // 无讨论数据时忽略
+            }
             console.log('[editorStore] 注释加载完成')
         } catch (e) {
             console.warn('[editorStore] 加载注释失败（可能暂无注释）:', e)
@@ -1498,6 +1594,79 @@ export const useEditorStore = defineStore('editor', () => {
             commitHistoryBaseline()
             requestPageThumbnail(currentPageIndex.value)
             requestPageThumbnail(0)
+        }
+    }
+
+    async function addAnnotationReply(
+        annotationId: string,
+        content: string,
+        parentReplyId?: string,
+    ): Promise<AnnotationReplyData | null> {
+        if (!fileId.value) return null
+        const text = content.trim()
+        if (!text) return null
+        try {
+            const saved = await ofdApi.addAnnotationReply(fileId.value, annotationId, {
+                author: discussionAuthor.value,
+                content: text,
+                parentReplyId: parentReplyId || undefined,
+            })
+            if (!annotationRepliesMap[annotationId]) {
+                annotationRepliesMap[annotationId] = []
+            }
+            annotationRepliesMap[annotationId].push(saved)
+            saveToHistory()
+            return saved
+        } catch (e) {
+            console.error('[editorStore] 添加讨论回复失败:', e)
+            return null
+        }
+    }
+
+    async function updateAnnotationReply(
+        annotationId: string,
+        replyId: string,
+        content: string,
+    ): Promise<boolean> {
+        if (!fileId.value) return false
+        const text = content.trim()
+        if (!text) return false
+        try {
+            const updated = await ofdApi.updateAnnotationReply(
+                fileId.value, annotationId, replyId, { content: text },
+            )
+            const list = annotationRepliesMap[annotationId]
+            const idx = list?.findIndex(r => r.id === replyId) ?? -1
+            if (idx !== -1 && list) list[idx] = updated
+            saveToHistory()
+            return true
+        } catch (e) {
+            console.error('[editorStore] 更新讨论回复失败:', e)
+            return false
+        }
+    }
+
+    async function deleteAnnotationReply(
+        annotationId: string,
+        replyId: string,
+    ): Promise<boolean> {
+        if (!fileId.value) return false
+        try {
+            await ofdApi.deleteAnnotationReply(fileId.value, annotationId, replyId)
+            const list = annotationRepliesMap[annotationId]
+            if (list) {
+                annotationRepliesMap[annotationId] = list.filter(
+                    r => r.id !== replyId && r.parentReplyId !== replyId,
+                )
+                if (annotationRepliesMap[annotationId].length === 0) {
+                    delete annotationRepliesMap[annotationId]
+                }
+            }
+            saveToHistory()
+            return true
+        } catch (e) {
+            console.error('[editorStore] 删除讨论回复失败:', e)
+            return false
         }
     }
 
@@ -1581,13 +1750,13 @@ export const useEditorStore = defineStore('editor', () => {
         openSearch, closeSearch, runSearch, nextMatch, prevMatch, jumpToMatch,
         toggleTextSelectMode, getPageTextItems,
         // ── 注释状态 ──
-        currentTool, annotationsMap, selectedAnnotationId,
-        rightPanelTab, annotationListScope, filteredAnnotationList, annotationCount,
+        currentTool, annotationsMap, annotationRepliesMap, discussionAuthor, selectedAnnotationId,
+        rightPanelTab, annotationListScope, flatAnnotationList, filteredAnnotationList, annotationCount,
         annotationColor, annotationOpacity, annotationLineWidth,
         pendingStampImage, hasPendingStamp,
         pageThumbnails, thumbnailLoadingPages, thumbnailLoadedCount, isGeneratingThumbnails,
         // ── 原有计算属性 ──
-        currentPage, selectedElement, canDeleteSelectedElement, canUndo, canRedo, isPdfDocument,
+        currentPage, selectedElement, canDeleteSelectedElement, canUndo, canRedo, hasUnsavedChanges, isPdfDocument,
         // ── 注释计算属性 ──
         currentPageAnnotations, selectedAnnotation,
         isHandTool, isSelectTool, isAnnotationTool,
@@ -1605,13 +1774,15 @@ export const useEditorStore = defineStore('editor', () => {
         importImageToPage, applyImageCrop,
         canCropSelectedImage, openImageCropDialog,
         insertPage, deletePage, movePage, copyPage, reorderPages,
-        saveToHistory, resetHistory, commitHistoryBaseline, undo, redo,
+        saveToHistory, resetHistory, commitHistoryBaseline, markDocumentSaved, undo, redo,
         getDocumentForSave, markNewElementsPersisted,
         // ── 注释方法 ──
         setTool, setAnnotationColor, setAnnotationOpacity,
         setAnnotationLineWidth, setPendingStampImage, clearPendingStampImage,
         selectAnnotation, openAnnotationListPanel, focusAnnotation, setAnnotationHidden,
-        addAnnotation, updateAnnotation, deleteAnnotation,
+        addAnnotation, updateAnnotation, deleteAnnotation, executeLinkAction,
+        getReplyCount, getRepliesForAnnotation, setDiscussionAuthor,
+        addAnnotationReply, updateAnnotationReply, deleteAnnotationReply,
         loadAllAnnotations, getAnnotationsByPage,
         exportWithAnnotations,
         getAnnotatedPdfBlob,

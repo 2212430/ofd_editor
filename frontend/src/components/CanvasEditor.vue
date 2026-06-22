@@ -197,9 +197,17 @@
             <v-text :config="item.stickyTxtCfg" />
           </v-group>
           <v-image
-              v-else-if="item.ann.type === 'STAMP' && stampImageMap[item.ann.id]"
+              v-else-if="item.ann.type === 'STAMP'"
               :config="item.stampCfg"
               @click="handleAnnotationClick($event, item.ann.id)"
+              @dragend="(e: any) => handleAnnotationDragEnd(e, item.ann)"
+              @transformend="(e: any) => handleAnnotationTransformEnd(e, item.ann)"
+          />
+          <v-rect
+              v-else-if="item.ann.type === 'LINK'"
+              :config="item.linkCfg"
+              @click="handleAnnotationClick($event, item.ann.id)"
+              @dblclick="handleAnnotationDblClick($event, item.ann.id)"
               @dragend="(e: any) => handleAnnotationDragEnd(e, item.ann)"
               @transformend="(e: any) => handleAnnotationTransformEnd(e, item.ann)"
           />
@@ -212,12 +220,10 @@
         />
       </v-layer>
 
-      <!-- ============================================================
-           Layer 3：临时绘制层
-           ============================================================ -->
-      <v-layer v-if="isDrawing">
+      <!-- Layer 3：临时绘制层（始终挂载，用 visible 隐藏，避免 v-if 与 Konva 冲突） -->
+      <v-layer :config="previewLayerConfig">
         <v-rect
-            v-if="['RECTANGLE', 'HIGHLIGHT'].includes(drawTool)"
+            v-if="['RECTANGLE', 'HIGHLIGHT', 'LINK'].includes(drawTool)"
             :config="previewRectConfig"
         />
         <v-ellipse
@@ -286,7 +292,7 @@
         :title="textEditMode === 'replace' ? '替换文本' : '编辑注释文本'"
         width="400px"
         :append-to-body="true"
-        @close="cancelTextEdit"
+        @closed="onTextEditDialogClosed"
     >
       <el-input
           v-model="textEditContent"
@@ -299,6 +305,15 @@
         <el-button type="primary" @click="confirmTextEdit">确定</el-button>
       </template>
     </el-dialog>
+
+    <LinkActionDialog
+        v-model="linkDialogVisible"
+        :page-count="store.document?.pageCount ?? 1"
+        :initial="linkDialogInitial"
+        :edit-id="linkEditTargetId"
+        @confirm="confirmLinkAction"
+        @cancel="onLinkDialogCancel"
+    />
   </div>
 </template>
 
@@ -310,6 +325,8 @@ import type { PageData, ElementData, AnnotationData } from '@/types'
 import { effectivePageSizeMm, konvaStageRotationConfig, normalizeViewRotation } from '@/utils/viewRotation'
 import { renderPdfPage, type PageTextItem } from '@/utils/pdfRender'
 import { buildSquigglyRelativePoints, relativePointsToKonva } from '@/utils/markupPath'
+import LinkActionDialog from '@/components/LinkActionDialog.vue'
+import type { LinkActionType } from '@/types'
 
 // ─────────────────────────────────────────────
 // Props / Store
@@ -469,7 +486,7 @@ const MM_TO_PX = 3.7795275591
  * HIGHLIGHT / UNDERLINE / STRIKEOUT / ARROW / FREEHAND
  * 不在此列，选中后只显示边框，不显示缩放锚点。
  */
-const RESIZABLE_TYPES = ['RECTANGLE', 'CIRCLE', 'TEXTBOX', 'STICKYNOTE', 'STAMP']
+const RESIZABLE_TYPES = ['RECTANGLE', 'CIRCLE', 'TEXTBOX', 'STICKYNOTE', 'STAMP', 'LINK']
 
 // ─────────────────────────────────────────────
 // Stage 基础配置
@@ -686,6 +703,14 @@ const visiblePageAnnotations = computed(() =>
     pageAnnotations.value.filter((a) => !a.hidden),
 )
 
+async function refreshAnnotationLayer() {
+  await nextTick()
+  const stage = stageRef.value?.getNode?.()
+  if (!stage) return
+  annotationLayerRef.value?.getNode()?.batchDraw()
+  stage.batchDraw()
+}
+
 function ensureActivePageForInteraction() {
   if (props.offscreen) return
   if (store.currentPageIndex !== props.pageIndex) {
@@ -713,6 +738,7 @@ const annotationConfigs = computed(() =>
       stickyBgCfg:    ann.type === 'STICKYNOTE'  ? getStickyNoteBgConfig(ann): null,
       stickyTxtCfg:   ann.type === 'STICKYNOTE'  ? getStickyNoteTextConfig(ann): null,
       stampCfg:       ann.type === 'STAMP'       ? getStampConfig(ann)       : null,
+      linkCfg:        ann.type === 'LINK'        ? getLinkConfig(ann)        : null,
     }))
 )
 // ─────────────────────────────────────────────
@@ -731,17 +757,24 @@ function toRawBase64(dataUrl: string): string {
   return comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl
 }
 
+function loadStampImage(ann: AnnotationData) {
+  if (ann.type !== 'STAMP' || !ann.stampBase64 || stampImageMap[ann.id]) return
+  const img = new window.Image()
+  img.onload = () => {
+    stampImageMap[ann.id] = img
+    void refreshAnnotationLayer()
+  }
+  img.src = stampImageSrc(ann.stampBase64)
+}
+
 watch(
-    pageAnnotations,
-    (anns) => {
-      for (const ann of anns) {
-        if (ann.type !== 'STAMP' || !ann.stampBase64 || stampImageMap[ann.id]) continue
-        const img = new window.Image()
-        img.onload = () => { stampImageMap[ann.id] = img }
-        img.src = stampImageSrc(ann.stampBase64)
+    () => pageAnnotations.value.map(a => a.id).join(','),
+    () => {
+      for (const ann of pageAnnotations.value) {
+        loadStampImage(ann)
       }
     },
-    { immediate: true, deep: false }
+    { immediate: true },
 )
 
 // ─────────────────────────────────────────────
@@ -835,17 +868,35 @@ const drawCurX      = ref(0)
 const drawCurY      = ref(0)
 const drawingPoints = ref<number[]>([])
 
-const previewRectConfig = computed(() => ({
-  x:           s(Math.min(drawStartX.value, drawCurX.value)),
-  y:           s(Math.min(drawStartY.value, drawCurY.value)),
-  width:       s(Math.abs(drawCurX.value - drawStartX.value)),
-  height:      s(Math.abs(drawCurY.value - drawStartY.value)),
-  fill:        store.currentTool === 'HIGHLIGHT' ? store.annotationColor : 'transparent',
-  opacity:     store.annotationOpacity,
-  stroke:      store.currentTool === 'HIGHLIGHT' ? 'transparent' : store.annotationColor,
-  strokeWidth: store.annotationLineWidth,
-  dash:        [4, 3],
+const previewLayerConfig = computed(() => ({
+  listening: false,
+  visible:   isDrawing.value,
 }))
+
+const previewRectConfig = computed(() => {
+  const wMm = Math.max(Math.abs(drawCurX.value - drawStartX.value), 0.5)
+  const hMm = Math.max(Math.abs(drawCurY.value - drawStartY.value), 0.5)
+  return {
+    x:           s(Math.min(drawStartX.value, drawCurX.value)),
+    y:           s(Math.min(drawStartY.value, drawCurY.value)),
+    width:       s(wMm),
+    height:      s(hMm),
+    fill:        store.currentTool === 'HIGHLIGHT'
+        ? store.annotationColor
+        : store.currentTool === 'LINK'
+            ? 'rgba(0, 120, 215, 0.12)'
+            : 'transparent',
+    opacity:     store.annotationOpacity,
+    stroke:      store.currentTool === 'HIGHLIGHT'
+        ? 'transparent'
+        : store.currentTool === 'LINK'
+            ? '#0078d4'
+            : store.annotationColor,
+    strokeWidth: store.annotationLineWidth,
+    dash:        [4, 3],
+    listening:   false,
+  }
+})
 
 const previewEllipseConfig = computed(() => {
   const rx = s(Math.abs(drawCurX.value - drawStartX.value)) / 2
@@ -923,7 +974,9 @@ const previewSquigglyConfig = computed(() => {
 
 const previewReplaceMidY = computed(() => (drawStartY.value + drawCurY.value) / 2)
 const previewReplaceX0 = computed(() => Math.min(drawStartX.value, drawCurX.value))
-const previewReplaceWidth = computed(() => Math.abs(drawCurX.value - drawStartX.value))
+const previewReplaceWidth = computed(() =>
+    Math.max(Math.abs(drawCurX.value - drawStartX.value), Math.abs(drawCurY.value - drawStartY.value), 0.5),
+)
 
 const previewReplaceGroupConfig = computed(() => ({
   x: s(previewReplaceX0.value),
@@ -934,6 +987,7 @@ const previewReplaceStrikeConfig = computed(() => ({
   points: [0, 0, s(previewReplaceWidth.value), 0],
   stroke:      store.annotationColor,
   strokeWidth: store.annotationLineWidth,
+  listening:   false,
 }))
 
 const previewReplaceCaretConfig = computed(() => ({
@@ -942,17 +996,92 @@ const previewReplaceCaretConfig = computed(() => ({
   strokeWidth: store.annotationLineWidth,
   lineCap:     'round' as const,
   lineJoin:    'round' as const,
+  listening:   false,
 }))
 
 // ─────────────────────────────────────────────
 // 文本注释编辑弹窗
 // ─────────────────────────────────────────────
 const textEditVisible  = ref(false)
+const textEditCommitted = ref(false)
 const textEditContent  = ref('')
 const textEditTargetId = ref<string | null>(null)
 const textEditMode     = ref<'textbox' | 'replace'>('textbox')
 let pendingTextAnn: Omit<AnnotationData, 'id' | 'createdAt' | 'updatedAt'> | null = null
 let pendingReplaceAnn: Omit<AnnotationData, 'id' | 'createdAt' | 'updatedAt'> | null = null
+let pendingLinkAnn: Omit<AnnotationData, 'id' | 'createdAt' | 'updatedAt'> | null = null
+
+const linkDialogVisible = ref(false)
+const linkCommitted = ref(false)
+const linkEditTargetId = ref<string | null>(null)
+const linkDialogInitial = ref<Partial<AnnotationData> | null>(null)
+
+function openLinkDialog(ann?: AnnotationData) {
+  if (ann) {
+    linkEditTargetId.value = ann.id
+    linkDialogInitial.value = {
+      actionType: ann.actionType,
+      targetPageIndex: ann.targetPageIndex,
+      uri: ann.uri,
+      content: ann.content,
+    }
+  } else {
+    linkEditTargetId.value = null
+    linkDialogInitial.value = {
+      actionType: 'GOTO_PAGE',
+      targetPageIndex: props.pageIndex,
+    }
+  }
+  linkDialogVisible.value = true
+}
+
+async function confirmLinkAction(payload: {
+  actionType: LinkActionType
+  targetPageIndex?: number
+  uri?: string
+  content?: string
+}) {
+  if (linkEditTargetId.value) {
+    await store.updateAnnotation(linkEditTargetId.value, {
+      actionType: payload.actionType,
+      targetPageIndex: payload.actionType === 'GOTO_PAGE' ? payload.targetPageIndex : undefined,
+      uri: payload.actionType === 'URI' ? payload.uri : undefined,
+      content: payload.content,
+    })
+    linkEditTargetId.value = null
+    ElMessage.success({ message: '链接已更新', duration: 1200, showClose: false })
+    return
+  }
+  const pending = pendingLinkAnn
+  if (!pending) return
+  linkCommitted.value = true
+  pendingLinkAnn = null
+  const result = await store.addAnnotation({
+    ...pending,
+    actionType: payload.actionType,
+    targetPageIndex: payload.actionType === 'GOTO_PAGE' ? payload.targetPageIndex : undefined,
+    uri: payload.actionType === 'URI' ? payload.uri : undefined,
+    content: payload.content,
+  })
+  if (result) {
+    await nextTick()
+    await refreshAnnotationLayer()
+    ElMessage.success({ message: '链接已添加', duration: 1200, showClose: false })
+  } else {
+    ElMessage.error('链接保存失败，请检查后端连接')
+  }
+}
+
+watch(linkDialogVisible, (open) => {
+  if (open) return
+  if (!linkCommitted.value) pendingLinkAnn = null
+  linkCommitted.value = false
+  linkEditTargetId.value = null
+})
+
+function onLinkDialogCancel() {
+  pendingLinkAnn = null
+}
 
 function openTextEdit(ann?: AnnotationData, mode: 'textbox' | 'replace' = 'textbox') {
   textEditMode.value = mode
@@ -972,45 +1101,79 @@ async function confirmTextEdit() {
     ElMessage.warning(textEditMode.value === 'replace' ? '替换文本不能为空' : '注释内容不能为空')
     return
   }
+  textEditCommitted.value = true
   if (textEditTargetId.value) {
     await store.updateAnnotation(textEditTargetId.value, { content: text })
   } else if (pendingReplaceAnn) {
-    const result = await store.addAnnotation({ ...pendingReplaceAnn, content: text })
+    const payload = { ...pendingReplaceAnn, content: text }
     pendingReplaceAnn = null
+    const result = await store.addAnnotation(payload)
     if (result) {
+      await refreshAnnotationLayer()
       ElMessage.success({ message: '注释已添加', duration: 1200, showClose: false })
     } else {
       ElMessage.error('注释保存失败，请检查后端连接')
     }
   } else if (pendingTextAnn) {
-    await store.addAnnotation({ ...pendingTextAnn, content: text })
+    const payload = { ...pendingTextAnn, content: text }
     pendingTextAnn = null
+    await store.addAnnotation(payload)
   }
   textEditVisible.value = false
 }
 
 function cancelTextEdit() {
-  pendingTextAnn        = null
-  pendingReplaceAnn     = null
   textEditVisible.value = false
+}
+
+function onTextEditDialogClosed() {
+  if (!textEditCommitted.value) {
+    pendingTextAnn = null
+    pendingReplaceAnn = null
+  }
+  textEditCommitted.value = false
+  textEditTargetId.value = null
+  textEditContent.value = ''
+  textEditMode.value = 'textbox'
 }
 
 // ─────────────────────────────────────────────
 // 获取 Stage 鼠标坐标（mm）
 // ─────────────────────────────────────────────
+function viewRotationDeg(): number {
+  return props.offscreen
+      ? normalizeViewRotation(props.page.pageRotate ?? 0)
+      : normalizeViewRotation((props.page.pageRotate ?? 0) + store.viewRotation)
+}
+
 function getStagePos(): { x: number; y: number } | null {
   const stage = stageRef.value?.getNode()
   if (!stage) return null
   const pos = stage.getPointerPosition()
   if (!pos) return null
-  const rot = props.offscreen
-      ? normalizeViewRotation(props.page.pageRotate ?? 0)
-      : normalizeViewRotation((props.page.pageRotate ?? 0) + store.viewRotation)
-  if (rot === 0) {
+  if (viewRotationDeg() === 0) {
     return { x: px2mm(pos.x), y: px2mm(pos.y) }
   }
   const local = stage.getAbsoluteTransform().copy().invert().point(pos)
   return { x: px2mm(local.x), y: px2mm(local.y) }
+}
+
+function getStagePosFromClient(client: { clientX: number; clientY: number }): { x: number; y: number } | null {
+  const stage = stageRef.value?.getNode()
+  if (!stage) return null
+  const box = stage.container().getBoundingClientRect()
+  let local = { x: client.clientX - box.left, y: client.clientY - box.top }
+  if (viewRotationDeg() !== 0) {
+    local = stage.getAbsoluteTransform().copy().invert().point(local)
+  }
+  return { x: px2mm(local.x), y: px2mm(local.y) }
+}
+
+function isDrawTooSmall(tool: string, width: number, height: number): boolean {
+  if (tool === 'FREEHAND') return false
+  if (tool === 'LINK') return width < 1 || height < 1
+  if (tool === 'REPLACE') return Math.max(width, height) < 1
+  return Math.max(width, height) < 1
 }
 
 // ─────────────────────────────────────────────
@@ -1045,6 +1208,7 @@ function onPanEnd() {
 onUnmounted(() => {
   window.removeEventListener('mousemove', onPanMove)
   window.removeEventListener('mouseup', onPanEnd)
+  stopDrawSession()
   if (pdfRenderTimer) clearTimeout(pdfRenderTimer)
 })
 
@@ -1081,57 +1245,144 @@ function handleMouseDown(e: any) {
   drawCurX.value      = pos.x
   drawCurY.value      = pos.y
   drawingPoints.value = [s(pos.x), s(pos.y)]
+  startDrawSession()
+  e.evt?.preventDefault?.()
 }
 
-function handleMouseMove(e: any) {
+function startDrawSession() {
+  window.addEventListener('mousemove', onWindowDrawMouseMove)
+  window.addEventListener('mouseup', onWindowDrawMouseUp)
+}
+
+function stopDrawSession() {
+  window.removeEventListener('mousemove', onWindowDrawMouseMove)
+  window.removeEventListener('mouseup', onWindowDrawMouseUp)
+}
+
+function onWindowDrawMouseMove(e: MouseEvent) {
+  if (!isDrawing.value) return
+  const pos = getStagePosFromClient(e) ?? getStagePos()
+  if (!pos) return
+  drawCurX.value = pos.x
+  drawCurY.value = pos.y
+  if (drawTool.value === 'FREEHAND') {
+    const lx = s(pos.x)
+    const ly = s(pos.y)
+    const pts = drawingPoints.value
+    if (pts.length < 2 || pts[pts.length - 2] !== lx || pts[pts.length - 1] !== ly) {
+      pts.push(lx, ly)
+    }
+  }
+}
+
+function handleMouseMove() {
   if (!isDrawing.value) return
   const pos = getStagePos()
   if (!pos) return
   drawCurX.value = pos.x
   drawCurY.value = pos.y
   if (drawTool.value === 'FREEHAND') {
-    drawingPoints.value.push(s(pos.x), s(pos.y))
+    const lx = s(pos.x)
+    const ly = s(pos.y)
+    const pts = drawingPoints.value
+    if (pts.length < 2 || pts[pts.length - 2] !== lx || pts[pts.length - 1] !== ly) {
+      pts.push(lx, ly)
+    }
   }
 }
 
-async function handleMouseUp() {
-  if (!isDrawing.value) return
+function onWindowDrawMouseUp() {
+  scheduleFinishDraw()
+}
+
+function handleMouseUp() {
+  scheduleFinishDraw()
+}
+
+function scheduleFinishDraw() {
+  setTimeout(() => { void finishDraw() }, 0)
+}
+
+/** 等预览层隐藏后再改注释层，避免同一帧内 vue-konva 结构冲突 */
+function waitForKonvaSettle(): Promise<void> {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+  })
+}
+
+let finishingDraw = false
+
+async function finishDraw() {
+  if (!isDrawing.value || finishingDraw) return
+  finishingDraw = true
+
+  const tool = drawTool.value
+  const endX = drawCurX.value
+  const endY = drawCurY.value
+  const x = Math.min(drawStartX.value, endX)
+  const y = Math.min(drawStartY.value, endY)
+  const width = Math.abs(endX - drawStartX.value)
+  const height = Math.abs(endY - drawStartY.value)
+
+  stopDrawSession()
   isDrawing.value = false
-  const pos = getStagePos()
-  if (!pos) return
-  const x      = Math.min(drawStartX.value, pos.x)
-  const y      = Math.min(drawStartY.value, pos.y)
-  const width  = Math.abs(pos.x - drawStartX.value)
-  const height = Math.abs(pos.y - drawStartY.value)
-  if (drawTool.value !== 'FREEHAND' && width < 1 && height < 1) return
-  if (drawTool.value === 'FREEHAND' && drawingPoints.value.length < 6) return
 
-  if (drawTool.value === 'REPLACE') {
-    const midY = y + height / 2
-    pendingReplaceAnn = {
-      type:        'REPLACE',
-      pageIndex:   props.pageIndex,
-      x,
-      y:           midY,
-      width,
-      height:      0,
-      opacity:     store.annotationOpacity,
-      color:       store.annotationColor,
-      strokeColor: store.annotationColor,
-      lineWidth:   store.annotationLineWidth,
-      fontSize:    12,
-      fontColor:   '#2980b9',
-      pathPoints:  [[0, 0], [width, 0]],
+  try {
+    if (tool === 'FREEHAND' && drawingPoints.value.length < 6) return
+    if (isDrawTooSmall(tool, width, height)) {
+      if (tool === 'LINK') {
+        ElMessage.warning('请拖选矩形热区（需同时拖出宽度和高度）')
+      } else if (tool === 'REPLACE') {
+        ElMessage.warning('请沿文字方向拖选替换范围')
+      }
+      return
     }
-    openTextEdit(undefined, 'replace')
-    return
-  }
 
-  await commitAnnotation(drawTool.value, x, y, width, height)
+    await waitForKonvaSettle()
+
+    if (tool === 'REPLACE') {
+      const span = Math.max(width, height)
+      const midY = y + height / 2
+      pendingReplaceAnn = {
+        type:        'REPLACE',
+        pageIndex:   props.pageIndex,
+        x,
+        y:           midY,
+        width:       span,
+        height:      0,
+        opacity:     store.annotationOpacity,
+        color:       store.annotationColor,
+        strokeColor: store.annotationColor,
+        lineWidth:   store.annotationLineWidth,
+        fontSize:    12,
+        fontColor:   '#2980b9',
+        pathPoints:  [[0, 0], [span, 0]],
+      }
+      openTextEdit(undefined, 'replace')
+      return
+    }
+
+    if (tool === 'LINK') {
+      pendingLinkAnn = {
+        type:        'LINK',
+        pageIndex:   props.pageIndex,
+        x, y, width, height,
+        opacity:     0.85,
+        strokeColor: '#0078d4',
+        lineWidth:   store.annotationLineWidth,
+      }
+      openLinkDialog()
+      return
+    }
+
+    await commitAnnotation(tool, x, y, width, height)
+  } finally {
+    finishingDraw = false
+  }
 }
 
 function handleMouseLeave() {
-  if (isDrawing.value) isDrawing.value = false
+  // 绘制中不在 mouseleave 时取消，由 window mouseup 完成拖选
 }
 
 function handleStageClick(e: any) {
@@ -1205,6 +1456,8 @@ async function placeStampAt(clickX: number, clickY: number, dataUrl: string) {
       stampBase64: toRawBase64(dataUrl),
     })
     if (result) {
+      loadStampImage(result)
+      await refreshAnnotationLayer()
       ElMessage.success({ message: '图章已添加', duration: 1200, showClose: false })
     } else {
       ElMessage.error('图章保存失败，请检查后端连接')
@@ -1237,12 +1490,23 @@ function handleAnnotationClick(e: any, id: string) {
   e.cancelBubble = true
   if (suppressClick.value) return
   ensureActivePageForInteraction()
+  const ann = pageAnnotations.value.find(a => a.id === id)
+  if (store.isHandTool && ann?.type === 'LINK') {
+    store.executeLinkAction(ann)
+    return
+  }
   if (store.currentTool === 'SELECT') store.selectAnnotation(id)
 }
 
 function handleAnnotationDblClick(e: any, id: string) {
   e.cancelBubble = true
   const ann = pageAnnotations.value.find(a => a.id === id)
+  if (ann?.type === 'LINK') {
+    if (store.isHandTool || store.currentTool === 'SELECT') {
+      store.executeLinkAction(ann)
+    }
+    return
+  }
   if (ann && ['TEXTBOX', 'STICKYNOTE', 'REPLACE'].includes(ann.type)) {
     openTextEdit(ann, ann.type === 'REPLACE' ? 'replace' : 'textbox')
   }
@@ -1296,6 +1560,12 @@ async function handleAnnotationDragEnd(e: any, ann: AnnotationData) {
     newY = ann.y + dy
     node.x(0)
     node.y(0)
+  } else if (ann.type === 'REPLACE') {
+    const offset = replaceTextOffsetMm(ann)
+    newX = px2mm(node.x())
+    newY = px2mm(node.y()) + offset
+    node.x(s(newX))
+    node.y(s(newY - offset))
   } else {
     // HIGHLIGHT / RECTANGLE / TEXTBOX / STICKYNOTE / STAMP / GROUP
     // 渲染时 x = s(ann.x)，拖动后 node.x() 是新的绝对 px
@@ -1450,6 +1720,7 @@ async function commitAnnotation(
 
   const result = await store.addAnnotation(base as any)
   if (result) {
+    await refreshAnnotationLayer()
     ElMessage.success({ message: '注释已添加', duration: 1200, showClose: false })
   } else {
     ElMessage.error('注释保存失败，请检查后端连接')
@@ -1905,6 +2176,24 @@ function getRectangleConfig(ann: AnnotationData) {
     stroke:      ann.strokeColor ?? ann.color ?? '#000000',
     strokeWidth: ann.lineWidth   ?? 2,
     opacity:     ann.opacity     ?? 1,
+    listening:   true,
+    draggable:   annDraggable(),
+  }
+}
+
+function getLinkConfig(ann: AnnotationData) {
+  const selected = store.selectedAnnotationId === ann.id
+  return {
+    name:        ann.id,
+    x:           s(ann.x),
+    y:           s(ann.y),
+    width:       s(ann.width),
+    height:      s(ann.height),
+    fill:        'rgba(0, 120, 215, 0.12)',
+    stroke:      selected ? '#005a9e' : (ann.strokeColor ?? '#0078d4'),
+    strokeWidth: ann.lineWidth ?? 2,
+    dash:        [6, 4],
+    opacity:     ann.opacity ?? 0.85,
     listening:   true,
     draggable:   annDraggable(),
   }

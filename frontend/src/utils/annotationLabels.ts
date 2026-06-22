@@ -1,4 +1,5 @@
 import type { AnnotationData } from '@/types'
+import { describeLinkTarget } from '@/utils/linkAction'
 
 export const ANNOTATION_TYPE_LABEL: Record<string, string> = {
     HIGHLIGHT: '高亮',
@@ -13,6 +14,7 @@ export const ANNOTATION_TYPE_LABEL: Record<string, string> = {
     TEXTBOX: '文本框',
     STICKYNOTE: '便利贴',
     STAMP: '图章',
+    LINK: '链接',
 }
 
 export function annotationTypeLabel(type: string): string {
@@ -29,6 +31,10 @@ export function annotationListTitle(ann: AnnotationData): string {
         }
     }
     if (ann.type === 'STAMP') return '图章'
+    if (ann.type === 'LINK') {
+        const target = describeLinkTarget(ann)
+        return target !== '未设置动作' && target !== '未设置网址' ? `链接：${target}` : '链接'
+    }
     return typeName
 }
 

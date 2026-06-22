@@ -21,6 +21,7 @@ public class AnnotationDTO {
      * RECTANGLE   - 矩形
      * FREEHAND    - 手绘
      * STAMP       - 图章
+     * LINK        - 链接热区
      */
     private String type;
 
@@ -78,6 +79,15 @@ public class AnnotationDTO {
 
     /** 是否在编辑器中隐藏（不写入 OFD 语义，仅会话内管理） */
     private Boolean hidden;
+
+    /** 链接动作：GOTO_PAGE | URI（LINK 使用） */
+    private String actionType;
+
+    /** 跳转目标页索引，从 0 开始（LINK / GOTO_PAGE 使用） */
+    private Integer targetPageIndex;
+
+    /** 外部链接地址（LINK / URI 使用） */
+    private String uri;
 
     // ==================== Getters & Setters ====================
 
@@ -137,6 +147,15 @@ public class AnnotationDTO {
 
     public Boolean getHidden() { return hidden; }
     public void setHidden(Boolean hidden) { this.hidden = hidden; }
+
+    public String getActionType() { return actionType; }
+    public void setActionType(String actionType) { this.actionType = actionType; }
+
+    public Integer getTargetPageIndex() { return targetPageIndex; }
+    public void setTargetPageIndex(Integer targetPageIndex) { this.targetPageIndex = targetPageIndex; }
+
+    public String getUri() { return uri; }
+    public void setUri(String uri) { this.uri = uri; }
 
     @Override
     public String toString() {

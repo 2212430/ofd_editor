@@ -503,6 +503,51 @@ export const ofdApi = {
         })
     },
 
+    /** 获取全部讨论回复 */
+    getAllAnnotationReplies: async (
+        fileId: string,
+    ): Promise<Record<string, import('@/types').AnnotationReplyData[]>> => {
+        const res = await http.get(`/${fileId}/annotation-replies/all`)
+        return res.data ?? {}
+    },
+
+    addAnnotationReply: async (
+        fileId: string,
+        annotationId: string,
+        reply: Omit<import('@/types').AnnotationReplyData, 'id' | 'annotationId' | 'createdAt' | 'updatedAt'>,
+    ): Promise<import('@/types').AnnotationReplyData> => {
+        const res = await http.post(`/${fileId}/annotations/${annotationId}/replies`, reply)
+        return res.data
+    },
+
+    updateAnnotationReply: async (
+        fileId: string,
+        annotationId: string,
+        replyId: string,
+        patch: Partial<Pick<import('@/types').AnnotationReplyData, 'content' | 'author'>>,
+    ): Promise<import('@/types').AnnotationReplyData> => {
+        const res = await http.put(
+            `/${fileId}/annotations/${annotationId}/replies/${replyId}`,
+            patch,
+        )
+        return res.data
+    },
+
+    deleteAnnotationReply: async (
+        fileId: string,
+        annotationId: string,
+        replyId: string,
+    ): Promise<void> => {
+        await http.delete(`/${fileId}/annotations/${annotationId}/replies/${replyId}`)
+    },
+
+    syncAnnotationReplies: async (
+        fileId: string,
+        allReplies: Record<string, import('@/types').AnnotationReplyData[]>,
+    ): Promise<void> => {
+        await http.put(`/${fileId}/annotation-replies/sync`, allReplies)
+    },
+
     /**
      * 导出含注释的OFD文件
      * GET /api/ofd/{fileId}/export

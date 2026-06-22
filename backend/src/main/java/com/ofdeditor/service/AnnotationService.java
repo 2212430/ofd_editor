@@ -1,6 +1,7 @@
 package com.ofdeditor.service;
 
 import com.ofdeditor.dto.AnnotationDTO;
+import com.ofdeditor.dto.AnnotationReplyDTO;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
@@ -21,6 +22,10 @@ public class AnnotationService {
     private final Map<String, Map<Integer, List<AnnotationDTO>>> cache =
             new ConcurrentHashMap<>();
 
+    /** fileId -> annotationId -> 讨论回复列表（不写入 OFD） */
+    private final Map<String, Map<String, List<AnnotationReplyDTO>>> replyCache =
+            new ConcurrentHashMap<>();
+
     /** 标记为原生 PDF 的 fileId：注释只存缓存，导出时由 PdfNativeService 烘焙，不写回 OFD */
     private final Set<String> pdfFileIds = ConcurrentHashMap.newKeySet();
 
@@ -34,6 +39,7 @@ public class AnnotationService {
     public void markPdf(String fileId) {
         pdfFileIds.add(fileId);
         cache.computeIfAbsent(fileId, k -> new ConcurrentHashMap<>());
+        replyCache.computeIfAbsent(fileId, k -> new ConcurrentHashMap<>());
     }
 
     public boolean isPdf(String fileId) {
@@ -171,6 +177,8 @@ public class AnnotationService {
             throw new NoSuchElementException("注释不存在: " + annotationId);
         }
 
+        deleteRepliesForAnnotation(fileId, annotationId);
+
         // 从 OFD 移除（原生 PDF 跳过）
         if (!isPdf(fileId)) {
             try {
@@ -209,11 +217,174 @@ public class AnnotationService {
         pdfFileIds.remove(fileId);
     }
 
+    public void clearCache(String fileId) {
+        cache.remove(fileId);
+        replyCache.remove(fileId);
+        pdfFileIds.remove(fileId);
+    }
+
     /**
      * 从 OFD 文件初始化注释缓存（文件打开时调用）
      */
     public void initFromOfd(String fileId, Map<Integer, List<AnnotationDTO>> annotationsFromOfd) {
         cache.put(fileId, new ConcurrentHashMap<>(annotationsFromOfd));
+        replyCache.put(fileId, new ConcurrentHashMap<>());
+    }
+
+    // ==================== 讨论回复（会话缓存，不写入 OFD） ====================
+
+    public List<AnnotationReplyDTO> getReplies(String fileId, String annotationId) {
+        return copyReplyList(
+                replyCache.getOrDefault(fileId, Collections.emptyMap())
+                        .getOrDefault(annotationId, Collections.emptyList()));
+    }
+
+    public Map<String, List<AnnotationReplyDTO>> getAllReplies(String fileId) {
+        Map<String, List<AnnotationReplyDTO>> src =
+                replyCache.getOrDefault(fileId, Collections.emptyMap());
+        Map<String, List<AnnotationReplyDTO>> out = new LinkedHashMap<>();
+        for (Map.Entry<String, List<AnnotationReplyDTO>> e : src.entrySet()) {
+            out.put(e.getKey(), copyReplyList(e.getValue()));
+        }
+        return out;
+    }
+
+    public AnnotationReplyDTO addReply(String fileId, String annotationId, AnnotationReplyDTO reply) {
+        requireAnnotationExists(fileId, annotationId);
+
+        if (reply.getId() == null || reply.getId().isEmpty()) {
+            reply.setId(UUID.randomUUID().toString());
+        }
+        long now = System.currentTimeMillis();
+        reply.setAnnotationId(annotationId);
+        reply.setCreatedAt(now);
+        reply.setUpdatedAt(now);
+        if (reply.getAuthor() == null || reply.getAuthor().isBlank()) {
+            reply.setAuthor("用户");
+        }
+        if (reply.getParentReplyId() != null && !reply.getParentReplyId().isBlank()) {
+            validateParentReply(fileId, annotationId, reply.getParentReplyId());
+        }
+
+        replyCache.computeIfAbsent(fileId, k -> new ConcurrentHashMap<>())
+                .computeIfAbsent(annotationId, k -> new ArrayList<>())
+                .add(copyReply(reply));
+        return copyReply(reply);
+    }
+
+    public AnnotationReplyDTO updateReply(String fileId, String annotationId,
+                                          String replyId, AnnotationReplyDTO patch) {
+        AnnotationReplyDTO existing = findReply(fileId, annotationId, replyId);
+        if (patch.getContent() != null && !patch.getContent().isBlank()) {
+            existing.setContent(patch.getContent().trim());
+        }
+        if (patch.getAuthor() != null && !patch.getAuthor().isBlank()) {
+            existing.setAuthor(patch.getAuthor().trim());
+        }
+        existing.setUpdatedAt(System.currentTimeMillis());
+        return copyReply(existing);
+    }
+
+    public void deleteReply(String fileId, String annotationId, String replyId) {
+        List<AnnotationReplyDTO> list = replyCache
+                .getOrDefault(fileId, Collections.emptyMap())
+                .get(annotationId);
+        if (list == null) {
+            throw new NoSuchElementException("回复不存在: " + replyId);
+        }
+
+        boolean removed = list.removeIf(r -> replyId.equals(r.getId()));
+        if (!removed) {
+            throw new NoSuchElementException("回复不存在: " + replyId);
+        }
+
+        // 级联删除子回复
+        list.removeIf(r -> replyId.equals(r.getParentReplyId()));
+    }
+
+    /**
+     * 全量同步某文件的讨论回复（用于撤销/重做后按新 annotationId 重建）
+     */
+    public void syncAllReplies(String fileId, Map<String, List<AnnotationReplyDTO>> allReplies) {
+        Map<String, List<AnnotationReplyDTO>> next = new ConcurrentHashMap<>();
+        if (allReplies != null) {
+            for (Map.Entry<String, List<AnnotationReplyDTO>> e : allReplies.entrySet()) {
+                if (e.getKey() == null || e.getValue() == null || e.getValue().isEmpty()) continue;
+                List<AnnotationReplyDTO> copied = new ArrayList<>();
+                for (AnnotationReplyDTO r : e.getValue()) {
+                    AnnotationReplyDTO copy = copyReply(r);
+                    copy.setAnnotationId(e.getKey());
+                    copied.add(copy);
+                }
+                next.put(e.getKey(), copied);
+            }
+        }
+        replyCache.put(fileId, next);
+    }
+
+    private void deleteRepliesForAnnotation(String fileId, String annotationId) {
+        Map<String, List<AnnotationReplyDTO>> map = replyCache.get(fileId);
+        if (map != null) {
+            map.remove(annotationId);
+        }
+    }
+
+    private void requireAnnotationExists(String fileId, String annotationId) {
+        Map<Integer, List<AnnotationDTO>> pageMap = cache.get(fileId);
+        if (pageMap == null) {
+            throw new NoSuchElementException("文件不存在: " + fileId);
+        }
+        for (List<AnnotationDTO> list : pageMap.values()) {
+            for (AnnotationDTO ann : list) {
+                if (annotationId.equals(ann.getId())) return;
+            }
+        }
+        throw new NoSuchElementException("注释不存在: " + annotationId);
+    }
+
+    private void validateParentReply(String fileId, String annotationId, String parentReplyId) {
+        List<AnnotationReplyDTO> list = replyCache
+                .getOrDefault(fileId, Collections.emptyMap())
+                .getOrDefault(annotationId, Collections.emptyList());
+        boolean found = list.stream().anyMatch(r -> parentReplyId.equals(r.getId()));
+        if (!found) {
+            throw new IllegalArgumentException("父回复不存在: " + parentReplyId);
+        }
+    }
+
+    private AnnotationReplyDTO findReply(String fileId, String annotationId, String replyId) {
+        List<AnnotationReplyDTO> list = replyCache
+                .getOrDefault(fileId, Collections.emptyMap())
+                .get(annotationId);
+        if (list == null) {
+            throw new NoSuchElementException("回复不存在: " + replyId);
+        }
+        for (AnnotationReplyDTO r : list) {
+            if (replyId.equals(r.getId())) {
+                return r;
+            }
+        }
+        throw new NoSuchElementException("回复不存在: " + replyId);
+    }
+
+    private List<AnnotationReplyDTO> copyReplyList(List<AnnotationReplyDTO> src) {
+        List<AnnotationReplyDTO> out = new ArrayList<>(src.size());
+        for (AnnotationReplyDTO r : src) {
+            out.add(copyReply(r));
+        }
+        return out;
+    }
+
+    private AnnotationReplyDTO copyReply(AnnotationReplyDTO src) {
+        AnnotationReplyDTO copy = new AnnotationReplyDTO();
+        copy.setId(src.getId());
+        copy.setAnnotationId(src.getAnnotationId());
+        copy.setAuthor(src.getAuthor());
+        copy.setContent(src.getContent());
+        copy.setParentReplyId(src.getParentReplyId());
+        copy.setCreatedAt(src.getCreatedAt());
+        copy.setUpdatedAt(src.getUpdatedAt());
+        return copy;
     }
 
     private AnnotationDTO mergeAnnotation(AnnotationDTO existing, AnnotationDTO patch, String annotationId) {
@@ -238,6 +409,9 @@ public class AnnotationService {
         merged.setPathPoints(firstNonNull(patch.getPathPoints(), existing.getPathPoints()));
         merged.setStampBase64(firstNonNull(patch.getStampBase64(), existing.getStampBase64()));
         merged.setHidden(patch.getHidden() != null ? patch.getHidden() : existing.getHidden());
+        merged.setActionType(firstNonNull(patch.getActionType(), existing.getActionType()));
+        merged.setTargetPageIndex(firstNonNull(patch.getTargetPageIndex(), existing.getTargetPageIndex()));
+        merged.setUri(firstNonNull(patch.getUri(), existing.getUri()));
         return merged;
     }
 

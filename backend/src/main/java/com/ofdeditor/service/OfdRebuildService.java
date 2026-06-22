@@ -1941,6 +1941,7 @@ public class OfdRebuildService {
         if (ann == null || ann.getType() == null) return null;
         return switch (ann.getType()) {
             case "STAMP"                                                         -> createStampElement(doc, ann, zipEntries, docPrefix);
+            case "LINK"                                                          -> createLinkElement(doc, ann);
             case "TEXTBOX", "STICKYNOTE"                                         -> createTextElement(doc, ann);
             case "HIGHLIGHT", "UNDERLINE", "SQUIGGLY", "STRIKEOUT", "REPLACE",
                  "RECTANGLE", "CIRCLE", "ARROW", "FREEHAND"                     -> createPathElement(doc, ann);
@@ -2052,6 +2053,56 @@ public class OfdRebuildService {
         }
         sb.append("]");
         return sb.toString();
+    }
+
+    private Element createLinkElement(Document doc, AnnotationDTO ann) {
+        Element el = doc.createElement("Link");
+        setBoundaryAttr(el, ann);
+        el.setAttribute("Type", "LINK");
+
+        String actionType = ann.getActionType();
+        if (isNotBlank(actionType)) {
+            el.setAttribute("LinkAction", actionType.trim().toUpperCase(Locale.ROOT));
+        }
+        if (ann.getTargetPageIndex() != null) {
+            el.setAttribute("TargetPageIndex", String.valueOf(ann.getTargetPageIndex()));
+        }
+        if (isNotBlank(ann.getContent())) {
+            el.setAttribute("Remark", ann.getContent().trim());
+        }
+
+        Element actions = doc.createElement("Actions");
+        Element action = doc.createElement("Action");
+
+        if ("URI".equalsIgnoreCase(actionType) && isNotBlank(ann.getUri())) {
+            action.setAttribute("Type", "URI");
+            Element uriEl = doc.createElement("URI");
+            uriEl.setTextContent(ann.getUri().trim());
+            action.appendChild(uriEl);
+        } else if (ann.getTargetPageIndex() != null) {
+            action.setAttribute("Type", "Goto");
+            Element dest = doc.createElement("Dest");
+            dest.setAttribute("Type", "XYZ");
+            dest.setAttribute("PageID", String.valueOf(ann.getTargetPageIndex()));
+            dest.setAttribute("Left", "0");
+            dest.setAttribute("Top", "0");
+            action.appendChild(dest);
+            if (!isNotBlank(actionType)) {
+                el.setAttribute("LinkAction", "GOTO_PAGE");
+            }
+        } else if (isNotBlank(ann.getUri())) {
+            action.setAttribute("Type", "URI");
+            Element uriEl = doc.createElement("URI");
+            uriEl.setTextContent(ann.getUri().trim());
+            action.appendChild(uriEl);
+            if (!isNotBlank(actionType)) {
+                el.setAttribute("LinkAction", "URI");
+            }
+        }
+
+        actions.appendChild(action);
+        el.appendChild(actions);
+        return el;
     }
 
     private Element createTextElement(Document doc, AnnotationDTO ann) {

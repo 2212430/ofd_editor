@@ -500,6 +500,101 @@ public class OfdParseService {
                 list.add(dto);
             }
 
+            // ── 4. Link → LINK ──
+            NodeList linkNodes = root.getElementsByTagNameNS("*", "Link");
+            if (linkNodes.getLength() == 0) {
+                linkNodes = root.getElementsByTagName("Link");
+            }
+            for (int i = 0; i < linkNodes.getLength(); i++) {
+                Node n = linkNodes.item(i);
+                if (!(n instanceof Element el)) continue;
+
+                String boundary = el.getAttribute("Boundary");
+                List<Double> nums = extractNumbers(boundary);
+                if (nums.size() < 4) continue;
+
+                AnnotationDTO dto = new AnnotationDTO();
+                dto.setId(UUID.randomUUID().toString());
+                dto.setType("LINK");
+                dto.setPageIndex(pageIndex);
+                dto.setX(nums.get(0));
+                dto.setY(nums.get(1));
+                dto.setWidth(nums.get(2));
+                dto.setHeight(nums.get(3));
+                dto.setOpacity(0.85);
+                dto.setStrokeColor("#0078D4");
+                dto.setLineWidth(2.0);
+                dto.setCreatedAt(System.currentTimeMillis());
+                dto.setUpdatedAt(dto.getCreatedAt());
+
+                String tooltip = firstNonBlank(
+                        el.getAttribute("Remark"),
+                        el.getAttribute("Tooltip"),
+                        el.getAttribute("tooltip")
+                );
+                if (isNotBlank(tooltip)) dto.setContent(tooltip.trim());
+
+                String linkAction = firstNonBlank(
+                        el.getAttribute("LinkAction"),
+                        el.getAttribute("linkAction")
+                );
+                String uri = null;
+                Integer targetPage = null;
+
+                String targetPageAttr = firstNonBlank(
+                        el.getAttribute("TargetPageIndex"),
+                        el.getAttribute("targetPageIndex")
+                );
+                if (isNotBlank(targetPageAttr)) {
+                    Integer idx = tryParseInteger(targetPageAttr.trim());
+                    if (idx != null) targetPage = idx;
+                }
+
+                NodeList actionNodes = el.getElementsByTagNameNS("*", "Action");
+                if (actionNodes.getLength() == 0) actionNodes = el.getElementsByTagName("Action");
+                for (int j = 0; j < actionNodes.getLength(); j++) {
+                    if (!(actionNodes.item(j) instanceof Element actionEl)) continue;
+                    String actionType = firstNonBlank(actionEl.getAttribute("Type"), actionEl.getAttribute("type"));
+                    if (actionType == null) continue;
+                    String normalized = actionType.trim().toUpperCase(Locale.ROOT);
+                    if ("URI".equals(normalized)) {
+                        linkAction = "URI";
+                        NodeList uriNodes = actionEl.getElementsByTagNameNS("*", "URI");
+                        if (uriNodes.getLength() == 0) uriNodes = actionEl.getElementsByTagName("URI");
+                        if (uriNodes.getLength() > 0) {
+                            String text = uriNodes.item(0).getTextContent();
+                            if (isNotBlank(text)) uri = text.trim();
+                        }
+                    } else if ("GOTO".equals(normalized)) {
+                        linkAction = "GOTO_PAGE";
+                        NodeList destNodes = actionEl.getElementsByTagNameNS("*", "Dest");
+                        if (destNodes.getLength() == 0) destNodes = actionEl.getElementsByTagName("Dest");
+                        if (destNodes.getLength() > 0 && destNodes.item(0) instanceof Element destEl) {
+                            String pageId = firstNonBlank(destEl.getAttribute("PageID"), destEl.getAttribute("PageId"));
+                            if (isNotBlank(pageId)) {
+                                Integer idx = tryParseInteger(pageId.trim());
+                                if (idx != null) targetPage = idx;
+                            }
+                        }
+                    }
+                }
+
+                if (isNotBlank(linkAction)) {
+                    String la = linkAction.trim().toUpperCase(Locale.ROOT);
+                    if ("URI".equals(la)) dto.setActionType("URI");
+                    else if ("GOTO".equals(la) || "GOTO_PAGE".equals(la)) dto.setActionType("GOTO_PAGE");
+                } else if (isNotBlank(uri)) {
+                    dto.setActionType("URI");
+                } else if (targetPage != null) {
+                    dto.setActionType("GOTO_PAGE");
+                }
+
+                if (targetPage != null) dto.setTargetPageIndex(targetPage);
+                if (isNotBlank(uri)) dto.setUri(uri);
+
+                list.add(dto);
+            }
+
         } catch (Exception e) {
             log.warn("parseAnnotationXmlToDTO 失败: pageIndex={}, msg={}", pageIndex, e.getMessage());
         }
@@ -3187,6 +3282,11 @@ public class OfdParseService {
 
     private Double tryParseDouble(String s) {
         try { return s == null ? null : Double.parseDouble(s.trim()); }
+        catch (Exception e) { return null; }
+    }
+
+    private Integer tryParseInteger(String s) {
+        try { return s == null ? null : Integer.parseInt(s.trim()); }
         catch (Exception e) { return null; }
     }
 

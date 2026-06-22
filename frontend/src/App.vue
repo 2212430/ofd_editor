@@ -136,6 +136,8 @@ import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Upload } from '@element-plus/icons-vue'
 import { useEditorStore } from '@/stores/editorStore'
+import { saveDocument, openPrintDialog } from '@/composables/useDocumentFileActions'
+import { confirmDiscardUnsavedChanges, registerBeforeUnloadGuard } from '@/composables/useUnsavedChangesGuard'
 import { ofdApi, downloadBlob } from '@/api/ofdApi'
 import { openNativePdf } from '@/utils/openPdf'
 import {
@@ -263,6 +265,7 @@ onMounted(() => {
   store.registerEditorAreaResolver(() => editorAreaRef.value ?? null)
   store.registerExportCurrentPageImageHook(handleExportCurrentPageImage)
   window.addEventListener('keydown', handleGlobalKeydown)
+  const removeBeforeUnload = registerBeforeUnloadGuard()
 
   store.registerThumbnailCaptureHook(async (pageIndex: number) => {
     const doc = store.document
@@ -281,12 +284,13 @@ onMounted(() => {
     // 过短的 dataURL 多为导出失败（空白图）
     return url.length > 200 ? url : null
   })
-})
 
-onUnmounted(() => {
-  store.registerExportCurrentPageImageHook(null)
-  store.registerThumbnailCaptureHook(null)
-  window.removeEventListener('keydown', handleGlobalKeydown)
+  onUnmounted(() => {
+    removeBeforeUnload()
+    store.registerExportCurrentPageImageHook(null)
+    store.registerThumbnailCaptureHook(null)
+    window.removeEventListener('keydown', handleGlobalKeydown)
+  })
 })
 
 function triggerUpload() {
@@ -304,12 +308,65 @@ function isEditableTarget(el: EventTarget | null): boolean {
   return !!el.closest('.el-input, .el-textarea, [contenteditable="true"]')
 }
 
+function handleEscapeKey() {
+  if (store.printDialogVisible) {
+    store.printDialogVisible = false
+    return
+  }
+  if (store.searchVisible) {
+    store.closeSearch()
+    return
+  }
+  if (store.selectedAnnotationId) {
+    store.selectAnnotation(null)
+    return
+  }
+  if (store.selectedElementId) {
+    store.selectElement(null)
+    return
+  }
+  if (store.currentTool !== 'SELECT') {
+    store.setTool('SELECT')
+  }
+}
+
+function goToRelativePage(delta: number) {
+  const count = store.document?.pageCount ?? 0
+  if (count <= 0) return
+  const next = Math.max(0, Math.min(count - 1, store.currentPageIndex + delta))
+  if (next !== store.currentPageIndex) {
+    store.setCurrentPage(next, { scrollIntoView: true })
+  }
+}
+
 function handleGlobalKeydown(e: KeyboardEvent) {
-  if (!store.document) return
   if (isEditableTarget(e.target)) return
 
-  // Delete / Backspace：删除选中的元素（文本 / 图片 / 矢量）
+  const mod = e.ctrlKey || e.metaKey
+
+  // Ctrl/Cmd + O：打开 OFD（欢迎页与编辑中均可用）
+  if (mod && (e.key === 'o' || e.key === 'O')) {
+    e.preventDefault()
+    triggerUpload()
+    return
+  }
+
+  if (e.key === 'Escape') {
+    handleEscapeKey()
+    return
+  }
+
+  if (!store.document) return
+
+  // Delete / Backspace：删除选中注释或页面元素
   if (e.key === 'Delete' || e.key === 'Backspace') {
+    if (store.selectedAnnotationId) {
+      e.preventDefault()
+      void store.deleteAnnotation(store.selectedAnnotationId).then((ok) => {
+        if (ok) ElMessage.success('注释已删除')
+      })
+      return
+    }
     if (store.canDeleteSelectedElement) {
       e.preventDefault()
       if (store.deleteSelectedElement()) {
@@ -319,13 +376,55 @@ function handleGlobalKeydown(e: KeyboardEvent) {
     return
   }
 
-  const mod = e.ctrlKey || e.metaKey
+  // PageUp / PageDown：上一页 / 下一页
+  if (!mod && e.key === 'PageUp') {
+    e.preventDefault()
+    goToRelativePage(-1)
+    return
+  }
+  if (!mod && e.key === 'PageDown') {
+    e.preventDefault()
+    goToRelativePage(1)
+    return
+  }
+
   if (!mod) return
+
+  // Ctrl/Cmd + S：保存 OFD
+  if (e.key === 's' || e.key === 'S') {
+    e.preventDefault()
+    void saveDocument()
+    return
+  }
+
+  // Ctrl/Cmd + P：打印
+  if (e.key === 'p' || e.key === 'P') {
+    e.preventDefault()
+    openPrintDialog()
+    return
+  }
 
   // Ctrl/Cmd + F：打开全文搜索
   if (e.key === 'f' || e.key === 'F') {
     e.preventDefault()
     store.openSearch()
+    return
+  }
+
+  // Ctrl/Cmd + = / +：放大；Ctrl/Cmd + -：缩小；Ctrl/Cmd + 0：实际大小
+  if (e.key === '=' || e.key === '+') {
+    e.preventDefault()
+    store.setScale(store.scale + 0.25)
+    return
+  }
+  if (e.key === '-' || e.key === '_') {
+    e.preventDefault()
+    store.setScale(store.scale - 0.25)
+    return
+  }
+  if (e.key === '0') {
+    e.preventDefault()
+    store.setScale(1)
     return
   }
 
@@ -353,6 +452,10 @@ function handleGlobalKeydown(e: KeyboardEvent) {
 async function handleWelcomeUpload(e: Event) {
   const file = (e.target as HTMLInputElement).files?.[0]
   if (!file) return
+  if (!await confirmDiscardUnsavedChanges('打开新文件')) {
+    ;(e.target as HTMLInputElement).value = ''
+    return
+  }
   store.setLoading(true, '正在解析OFD文件...')
   try {
     const doc = await ofdApi.parseOfd(file)

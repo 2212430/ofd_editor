@@ -14,6 +14,10 @@ export type AnnotationType =
     | 'RECTANGLE'    // 矩形
     | 'FREEHAND'     // 手绘
     | 'STAMP'        // 图章
+    | 'LINK'         // 链接热区
+
+/** 链接注释动作类型 */
+export type LinkActionType = 'GOTO_PAGE' | 'URI'
 
 // 当前工具类型
 export type ToolType =
@@ -31,6 +35,7 @@ export type ToolType =
     | 'RECTANGLE'
     | 'FREEHAND'
     | 'STAMP'
+    | 'LINK'
 
 // ========== OFD原生元素（保持不变） ==========
 export interface ElementData {
@@ -114,10 +119,29 @@ export interface AnnotationData {
     // 图章相关（STAMP）
     stampBase64?: string
 
+    // 链接相关（LINK）
+    actionType?: LinkActionType
+    /** 跳转目标页索引（0 起，GOTO_PAGE 使用） */
+    targetPageIndex?: number
+    /** 外部链接地址（URI 使用） */
+    uri?: string
+
     /** 是否在画布上隐藏（注释列表可切换；默认 false 为显示） */
     hidden?: boolean
 
     // 时间戳
+    createdAt?: number
+    updatedAt?: number
+}
+
+/** 注释讨论回复（会话缓存，不写入 OFD） */
+export interface AnnotationReplyData {
+    id: string
+    annotationId: string
+    author: string
+    content: string
+    /** 为空表示直接回复注释 */
+    parentReplyId?: string
     createdAt?: number
     updatedAt?: number
 }

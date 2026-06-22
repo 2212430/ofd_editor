@@ -5,6 +5,15 @@
         <el-radio-button value="current">当前页</el-radio-button>
         <el-radio-button value="all">全部</el-radio-button>
       </el-radio-group>
+      <el-button
+          size="small"
+          type="primary"
+          link
+          :disabled="!store.document || store.annotationCount === 0"
+          @click="reportVisible = true"
+      >
+        汇总报告
+      </el-button>
     </div>
 
     <div v-if="!store.document" class="empty-tip">
@@ -37,6 +46,9 @@
         </div>
         <div class="ann-item-meta">
           <span class="ann-page">第 {{ item.pageIndex + 1 }} 页</span>
+          <span v-if="store.getReplyCount(item.annotation.id) > 0" class="ann-replies">
+            💬 {{ store.getReplyCount(item.annotation.id) }}
+          </span>
           <el-switch
               :model-value="isAnnotationVisible(item.annotation)"
               size="small"
@@ -50,6 +62,8 @@
         </div>
       </li>
     </ul>
+
+    <AnnotationReportDialog v-model="reportVisible" />
   </div>
 </template>
 
@@ -58,12 +72,14 @@ import { computed, nextTick, ref, watch } from 'vue'
 import type { ComponentPublicInstance } from 'vue'
 import { ChatLineSquare } from '@element-plus/icons-vue'
 import { useEditorStore } from '@/stores/editorStore'
+import AnnotationReportDialog from '@/components/AnnotationReportDialog.vue'
 import {
   annotationListTitle, annotationTypeLabel, isAnnotationVisible,
 } from '@/utils/annotationLabels'
 
 const store = useEditorStore()
 const listRef = ref<HTMLElement>()
+const reportVisible = ref(false)
 const itemRefs = new Map<string, HTMLElement>()
 
 const listScope = computed({
@@ -111,11 +127,14 @@ watch(
   padding: 8px 10px;
   border-bottom: 1px solid var(--line);
   background: #fafafa;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .panel-toolbar :deep(.el-radio-group) {
+  flex: 1;
   display: flex;
-  width: 100%;
 }
 
 .panel-toolbar :deep(.el-radio-button) {
@@ -215,5 +234,12 @@ watch(
 .ann-page {
   font-size: 11px;
   color: var(--text-3);
+}
+
+.ann-replies {
+  font-size: 11px;
+  color: var(--ribbon-accent);
+  margin-right: auto;
+  margin-left: 4px;
 }
 </style>

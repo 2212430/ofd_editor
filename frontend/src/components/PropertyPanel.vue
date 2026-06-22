@@ -52,7 +52,7 @@
         <el-divider style="margin: 8px 0" />
 
         <!-- 颜色 -->
-        <div class="form-item">
+        <div v-if="selectedAnnotation.type !== 'LINK'" class="form-item">
           <label>颜色</label>
           <el-color-picker
               v-model="editColor"
@@ -74,7 +74,7 @@
 
         <!-- 线宽 -->
         <div
-            v-if="!['HIGHLIGHT','TEXTBOX','STICKYNOTE','STAMP'].includes(selectedAnnotation.type)"
+            v-if="!['HIGHLIGHT','TEXTBOX','STICKYNOTE','STAMP','LINK'].includes(selectedAnnotation.type)"
             class="form-item"
         >
           <label>线条粗细</label>
@@ -115,6 +115,59 @@
             />
           </div>
         </template>
+
+        <template v-if="selectedAnnotation.type === 'LINK'">
+          <el-divider style="margin: 8px 0" />
+          <div class="form-item">
+            <label>动作类型</label>
+            <el-radio-group
+                :model-value="selectedAnnotation.actionType ?? 'GOTO_PAGE'"
+                size="small"
+                @change="onLinkActionTypeChange"
+            >
+              <el-radio value="GOTO_PAGE">跳转到页</el-radio>
+              <el-radio value="URI">打开网址</el-radio>
+            </el-radio-group>
+          </div>
+          <div v-if="(selectedAnnotation.actionType ?? 'GOTO_PAGE') === 'GOTO_PAGE'" class="form-item">
+            <label>目标页</label>
+            <el-input-number
+                :model-value="(selectedAnnotation.targetPageIndex ?? 0) + 1"
+                size="small"
+                :min="1"
+                :max="store.document?.pageCount ?? 1"
+                @change="onLinkPageChange"
+            />
+          </div>
+          <div v-else class="form-item">
+            <label>网址</label>
+            <el-input
+                :model-value="selectedAnnotation.uri ?? ''"
+                size="small"
+                placeholder="https://..."
+                @change="(v: string) => updateAnnotation({ uri: v.trim() })"
+            />
+          </div>
+          <div class="form-item">
+            <label>提示文字</label>
+            <el-input
+                :model-value="selectedAnnotation.content ?? ''"
+                size="small"
+                placeholder="可选"
+                @change="(v: string) => updateAnnotation({ content: v })"
+            />
+          </div>
+          <el-button type="primary" plain size="small" style="width:100%" @click="handleExecuteLink">
+            执行链接
+          </el-button>
+        </template>
+
+        <el-divider style="margin: 8px 0" />
+
+        <AnnotationDiscussion
+            v-if="store.selectedAnnotationId"
+            :annotation-id="store.selectedAnnotationId"
+        />
 
         <el-divider style="margin: 8px 0" />
 
@@ -279,6 +332,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useEditorStore } from '@/stores/editorStore'
 import type { ElementData, AnnotationData } from '@/types'
 import { ANNOTATION_TYPE_LABEL as annTypeLabel } from '@/utils/annotationLabels'
+import type { LinkActionType } from '@/types'
+import AnnotationDiscussion from '@/components/AnnotationDiscussion.vue'
 
 const store = useEditorStore()
 
@@ -341,6 +396,30 @@ function updateAnnotation(changes: Partial<AnnotationData>) {
   }
 
   store.updateAnnotation(store.selectedAnnotationId, finalChanges)
+}
+
+function onLinkActionTypeChange(actionType: LinkActionType) {
+  if (actionType === 'GOTO_PAGE') {
+    updateAnnotation({
+      actionType,
+      uri: undefined,
+      targetPageIndex: selectedAnnotation.value?.targetPageIndex ?? store.currentPageIndex,
+    })
+  } else {
+    updateAnnotation({
+      actionType,
+      targetPageIndex: undefined,
+    })
+  }
+}
+
+function onLinkPageChange(pageNumber: number) {
+  updateAnnotation({ targetPageIndex: Math.max(0, pageNumber - 1) })
+}
+
+function handleExecuteLink() {
+  const ann = selectedAnnotation.value
+  if (ann?.type === 'LINK') store.executeLinkAction(ann)
 }
 
 async function handleDeleteAnnotation() {
