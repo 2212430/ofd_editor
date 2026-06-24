@@ -167,7 +167,7 @@ export async function releasePdfDocument(token: string): Promise<void> {
     }
 }
 
-async function mustDoc(token: string): Promise<PDFDocumentProxy> {
+export async function mustDoc(token: string): Promise<PDFDocumentProxy> {
     const entry = docs.get(token)
     if (!entry) throw new Error(`PDF 文档未加载: ${token}`)
     return entry.doc

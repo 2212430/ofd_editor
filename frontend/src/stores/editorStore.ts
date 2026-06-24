@@ -3,6 +3,7 @@ import { ref, computed, reactive, nextTick } from 'vue'
 import type {
     DocumentData, ElementData, PageData,
     AnnotationData, AnnotationReplyData, AnnotationType, ToolType, DocumentSource, PageViewMode, WatermarkConfig,
+    OutlineItem,
 } from '@/types'
 import { ofdApi } from '@/api/ofdApi'
 import { getPdfPageTextItems, type PageTextItem } from '@/utils/pdfRender'
@@ -80,6 +81,10 @@ export const useEditorStore = defineStore('editor', () => {
 
     /** 全局文本水印（保存/导出时烘焙） */
     const watermarkConfig = ref<WatermarkConfig | null>(null)
+
+    /** 左侧面板：页面缩略图 / 文档大纲 */
+    const leftPanelTab = ref<'pages' | 'outline'>('pages')
+    const outlines = ref<OutlineItem[]>([])
 
     // 每页文本项缓存（OFD 从已解析元素取，PDF 从 PDF.js 取）
     const pageTextItemsCache = new Map<string, PageTextItem[]>()
@@ -283,6 +288,7 @@ export const useEditorStore = defineStore('editor', () => {
     })
 
     const isPdfDocument = computed(() => documentKind.value === 'pdf')
+    const hasOutlines = computed(() => outlines.value.length > 0)
 
     const isHandTool = computed(() => currentTool.value === 'HAND')
     const isSelectTool = computed(() => currentTool.value === 'SELECT')
@@ -503,7 +509,34 @@ export const useEditorStore = defineStore('editor', () => {
         viewRotation.value = 0
         resetHistory()
         clearAnnotationRepliesMap()
+        outlines.value = doc.outlines ?? []
+        leftPanelTab.value = 'pages'
         void nextTick(() => { fitToWidth() })
+    }
+
+    function setOutlines(items: OutlineItem[]) {
+        outlines.value = items
+    }
+
+    function setLeftPanelTab(tab: 'pages' | 'outline') {
+        leftPanelTab.value = tab
+    }
+
+    function showOutlinePanel() {
+        leftPanelTab.value = 'outline'
+    }
+
+    function navigateOutline(item: OutlineItem) {
+        if (item.uri) {
+            const raw = item.uri.trim()
+            if (!raw) return
+            const href = /^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(raw) ? raw : `https://${raw}`
+            window.open(href, '_blank', 'noopener,noreferrer')
+            return
+        }
+        if (item.pageIndex != null) {
+            setCurrentPage(item.pageIndex, { scrollIntoView: true })
+        }
     }
 
     function clearPageThumbnails() {
@@ -1744,6 +1777,8 @@ export const useEditorStore = defineStore('editor', () => {
         history, historyIndex, fileId, renderVersion,
         printDialogVisible,
         imageCropDialogVisible,
+        watermarkConfig, leftPanelTab, outlines, hasOutlines,
+        setOutlines, setLeftPanelTab, showOutlinePanel, navigateOutline,
         // ── 搜索 / 文本选择 ──
         searchVisible, searchQuery, searchMatches, searchActiveIndex, searching,
         textSelectMode, searchMatchesByPage,

@@ -167,6 +167,16 @@ export type DocumentSource = 'ofd' | 'pdf'
 /** 编辑区页面视图：单页 / 连续滚动 */
 export type PageViewMode = 'single' | 'continuous'
 
+/** 文档大纲（书签）节点 */
+export interface OutlineItem {
+    title: string
+    /** 跳转目标页（0 基） */
+    pageIndex?: number
+    /** 外部链接 */
+    uri?: string
+    children?: OutlineItem[]
+}
+
 // ========== 文档数据（保持不变） ==========
 export interface DocumentData {
     fileId?: string
@@ -174,6 +184,8 @@ export interface DocumentData {
     author?: string
     pageCount: number
     pages: PageData[]
+    /** 文档大纲（OFD 由后端解析；PDF 由前端 PDF.js 加载） */
+    outlines?: OutlineItem[]
     /** 保存/导出时烘焙的全局文本水印（可空） */
     watermark?: WatermarkConfig
 }

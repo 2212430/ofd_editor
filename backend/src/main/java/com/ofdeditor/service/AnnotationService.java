@@ -210,13 +210,8 @@ public class AnnotationService {
     // ==================== 缓存管理 ====================
 
     /**
-     * 文件关闭时清理缓存
+     * 文件关闭时清理缓存（批注、回复、PDF 标记）
      */
-    public void clearCache(String fileId) {
-        cache.remove(fileId);
-        pdfFileIds.remove(fileId);
-    }
-
     public void clearCache(String fileId) {
         cache.remove(fileId);
         replyCache.remove(fileId);

@@ -19,6 +19,7 @@ import org.w3c.dom.Element;
 import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
 import com.ofdeditor.dto.AnnotationDTO;
+import com.ofdeditor.dto.OutlineItemDTO;
 import javax.imageio.ImageIO;
 import javax.xml.parsers.DocumentBuilderFactory;
 import java.awt.image.BufferedImage;
@@ -87,6 +88,8 @@ public class OfdParseService {
             int pageCount = reader.getNumberOfPages();
             documentDTO.setPageCount(pageCount);
 
+            Map<Long, Integer> pageRefToIndex = buildPageRefToIndex(reader);
+
             for (int i = 0; i < pageCount; i++) {
                 try {
                     pages.add(parsePage(reader, i, ctx));
@@ -101,6 +104,8 @@ public class OfdParseService {
                     pages.add(emptyPage);
                 }
             }
+
+            documentDTO.setOutlines(parseOutlinesFromZip(zipFile, pageRefToIndex));
         }
 
         documentDTO.setPages(pages);
@@ -2816,6 +2821,179 @@ public class OfdParseService {
             log.warn("构建 PageRef 映射失败: {}", e.getMessage());
         }
         return map;
+    }
+
+    // ==================== 文档大纲（Outlines） ====================
+
+    private List<OutlineItemDTO> parseOutlinesFromZip(ZipFile zip, Map<Long, Integer> pageRefToIndex) {
+        try {
+            String documentXmlPath = findDocumentXmlPathInZip(zip);
+            if (documentXmlPath == null) return Collections.emptyList();
+
+            Document documentDoc = parseXml(zip, documentXmlPath);
+            Element docRootElem = documentDoc.getDocumentElement();
+            Map<String, Integer> xmlPageIdToIndex = buildPageXmlIdToIndex(docRootElem);
+
+            NodeList outlinesNodes = docRootElem.getElementsByTagNameNS("*", "Outlines");
+            if (outlinesNodes.getLength() == 0) {
+                outlinesNodes = docRootElem.getElementsByTagName("Outlines");
+            }
+            if (outlinesNodes.getLength() == 0) return Collections.emptyList();
+
+            Element outlinesEl = (Element) outlinesNodes.item(0);
+            List<OutlineItemDTO> items = parseOutlineElemChildren(outlinesEl, pageRefToIndex, xmlPageIdToIndex);
+            log.info("大纲解析: {} 个顶级节点", items.size());
+            return items;
+        } catch (Exception e) {
+            log.warn("解析文档大纲失败: {}", e.getMessage());
+            return Collections.emptyList();
+        }
+    }
+
+    private String findDocumentXmlPathInZip(ZipFile zip) throws Exception {
+        String ofdXmlPath = findEntryIgnoreCase(zip, "OFD.xml");
+        if (ofdXmlPath == null) return null;
+
+        Document ofdDoc = parseXml(zip, ofdXmlPath);
+        String docRoot = getFirstTextByLocalName(ofdDoc.getDocumentElement(), "DocRoot");
+        if (!isNotBlank(docRoot)) return null;
+        docRoot = normalizePath(docRoot);
+
+        String documentXmlPath = resolvePath(docRoot, "Document.xml");
+        if (zip.getEntry(documentXmlPath) == null) {
+            documentXmlPath = findEntryEndsWithIgnoreCase(zip, "/" + docRoot + "/Document.xml");
+            if (documentXmlPath == null) {
+                documentXmlPath = findEntryEndsWithIgnoreCase(zip, "Document.xml");
+            }
+        }
+        return documentXmlPath;
+    }
+
+    private Map<String, Integer> buildPageXmlIdToIndex(Element documentRoot) {
+        Map<String, Integer> map = new HashMap<>();
+        NodeList pagesNodes = documentRoot.getElementsByTagNameNS("*", "Pages");
+        if (pagesNodes.getLength() == 0) pagesNodes = documentRoot.getElementsByTagName("Pages");
+        if (pagesNodes.getLength() == 0) return map;
+
+        Element pagesEl = (Element) pagesNodes.item(0);
+        NodeList pageNodes = pagesEl.getChildNodes();
+        int index = 0;
+        for (int i = 0; i < pageNodes.getLength(); i++) {
+            Node n = pageNodes.item(i);
+            if (!(n instanceof Element pageEl)) continue;
+            if (!"Page".equalsIgnoreCase(elementLocalName(pageEl))) continue;
+            String id = firstNonBlank(pageEl.getAttribute("ID"), pageEl.getAttribute("Id"), pageEl.getAttribute("id"));
+            if (isNotBlank(id)) map.put(id.trim(), index);
+            index++;
+        }
+        return map;
+    }
+
+    private List<OutlineItemDTO> parseOutlineElemChildren(Element parent,
+                                                          Map<Long, Integer> pageRefToIndex,
+                                                          Map<String, Integer> xmlPageIdToIndex) {
+        List<OutlineItemDTO> result = new ArrayList<>();
+        NodeList children = parent.getChildNodes();
+        for (int i = 0; i < children.getLength(); i++) {
+            Node n = children.item(i);
+            if (!(n instanceof Element el)) continue;
+            if (!"OutlineElem".equalsIgnoreCase(elementLocalName(el))) continue;
+            OutlineItemDTO item = parseOneOutlineElem(el, pageRefToIndex, xmlPageIdToIndex);
+            if (item != null) result.add(item);
+        }
+        return result;
+    }
+
+    private OutlineItemDTO parseOneOutlineElem(Element el,
+                                               Map<Long, Integer> pageRefToIndex,
+                                               Map<String, Integer> xmlPageIdToIndex) {
+        String title = getFirstTextByLocalName(el, "Title");
+        if (!isNotBlank(title)) title = "未命名";
+
+        OutlineItemDTO dto = new OutlineItemDTO();
+        dto.setTitle(title.trim());
+        applyOutlineActions(el, dto, pageRefToIndex, xmlPageIdToIndex);
+
+        List<OutlineItemDTO> children = parseOutlineElemChildren(el, pageRefToIndex, xmlPageIdToIndex);
+        if (!children.isEmpty()) dto.setChildren(children);
+        return dto;
+    }
+
+    private void applyOutlineActions(Element outlineElem,
+                                     OutlineItemDTO dto,
+                                     Map<Long, Integer> pageRefToIndex,
+                                     Map<String, Integer> xmlPageIdToIndex) {
+        NodeList actionNodes = outlineElem.getElementsByTagNameNS("*", "Action");
+        if (actionNodes.getLength() == 0) actionNodes = outlineElem.getElementsByTagName("Action");
+
+        for (int i = 0; i < actionNodes.getLength(); i++) {
+            if (!(actionNodes.item(i) instanceof Element actionEl)) continue;
+            String actionType = firstNonBlank(actionEl.getAttribute("Type"), actionEl.getAttribute("type"));
+            if (!isNotBlank(actionType)) continue;
+            String normalized = actionType.trim().toUpperCase(Locale.ROOT);
+
+            if ("URI".equals(normalized)) {
+                NodeList uriNodes = actionEl.getElementsByTagNameNS("*", "URI");
+                if (uriNodes.getLength() == 0) uriNodes = actionEl.getElementsByTagName("URI");
+                if (uriNodes.getLength() > 0) {
+                    String text = uriNodes.item(0).getTextContent();
+                    if (isNotBlank(text)) {
+                        dto.setUri(text.trim());
+                        return;
+                    }
+                }
+            } else if ("GOTO".equals(normalized)) {
+                Integer pageIndex = resolveOutlineDestPageIndex(actionEl, pageRefToIndex, xmlPageIdToIndex);
+                if (pageIndex != null) {
+                    dto.setPageIndex(pageIndex);
+                    return;
+                }
+            }
+        }
+
+        // 部分 OFD 直接在 OutlineElem 下放 Dest
+        Integer directDest = resolveOutlineDestPageIndex(outlineElem, pageRefToIndex, xmlPageIdToIndex);
+        if (directDest != null) dto.setPageIndex(directDest);
+    }
+
+    private Integer resolveOutlineDestPageIndex(Element scope,
+                                                Map<Long, Integer> pageRefToIndex,
+                                                Map<String, Integer> xmlPageIdToIndex) {
+        NodeList destNodes = scope.getElementsByTagNameNS("*", "Dest");
+        if (destNodes.getLength() == 0) destNodes = scope.getElementsByTagName("Dest");
+        if (destNodes.getLength() == 0) return null;
+
+        if (!(destNodes.item(0) instanceof Element destEl)) return null;
+        String pageId = firstNonBlank(destEl.getAttribute("PageID"), destEl.getAttribute("PageId"), destEl.getAttribute("pageID"));
+        return resolveOutlinePageIndex(pageId, pageRefToIndex, xmlPageIdToIndex);
+    }
+
+    private Integer resolveOutlinePageIndex(String pageIdStr,
+                                            Map<Long, Integer> pageRefToIndex,
+                                            Map<String, Integer> xmlPageIdToIndex) {
+        if (!isNotBlank(pageIdStr)) return null;
+        String trimmed = pageIdStr.trim();
+
+        if (xmlPageIdToIndex != null) {
+            Integer xmlIdx = xmlPageIdToIndex.get(trimmed);
+            if (xmlIdx != null) return xmlIdx;
+        }
+
+        try {
+            long refId = Long.parseLong(trimmed);
+            if (pageRefToIndex != null) {
+                Integer idx = pageRefToIndex.get(refId);
+                if (idx != null) return idx;
+            }
+        } catch (NumberFormatException ignored) {
+            // fall through
+        }
+
+        Integer parsed = tryParseInteger(trimmed);
+        if (parsed == null) return null;
+        if (pageRefToIndex != null && pageRefToIndex.containsValue(parsed)) return parsed;
+        if (parsed > 0) return parsed - 1;
+        return parsed;
     }
 
     private Integer resolveStampPageIndex(ST_RefID pageRef, Map<Long, Integer> pageRefToIndex) {

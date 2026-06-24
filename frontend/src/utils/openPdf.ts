@@ -8,6 +8,7 @@ import { useEditorStore } from '@/stores/editorStore'
 import { ofdApi } from '@/api/ofdApi'
 import { confirmDiscardUnsavedChanges } from '@/composables/useUnsavedChangesGuard'
 import { loadPdfDocument, releasePdfDocument } from '@/utils/pdfRender'
+import { loadPdfOutline } from '@/utils/pdfOutline'
 
 export async function openNativePdf(file: File): Promise<void> {
     const store = useEditorStore()
@@ -26,6 +27,8 @@ export async function openNativePdf(file: File): Promise<void> {
 
     store.setLoadingProgress(96, '正在初始化 PDF 渲染…')
     await loadPdfDocument(doc.fileId, buf)
+    const outlines = await loadPdfOutline(doc.fileId)
+    doc.outlines = outlines
     store.setLoadingProgress(100, '加载完成')
 
     store.setDocument(doc, 'pdf')

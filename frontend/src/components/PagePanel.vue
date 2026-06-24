@@ -1,9 +1,32 @@
 <template>
   <div class="page-panel">
     <div class="panel-header">
-      <span>页面列表</span>
-      <span class="page-count">{{ store.document?.pageCount ?? 0 }} 页</span>
+      <div class="panel-tabs">
+        <button
+            type="button"
+            class="panel-tab"
+            :class="{ active: store.leftPanelTab === 'pages' }"
+            @click="store.setLeftPanelTab('pages')"
+        >
+          页面
+        </button>
+        <button
+            type="button"
+            class="panel-tab"
+            :class="{ active: store.leftPanelTab === 'outline' }"
+            @click="store.setLeftPanelTab('outline')"
+        >
+          大纲
+        </button>
+      </div>
+      <span v-if="store.leftPanelTab === 'pages'" class="page-count">{{ store.document?.pageCount ?? 0 }} 页</span>
     </div>
+
+    <template v-if="store.leftPanelTab === 'outline'">
+      <OutlinePanel />
+    </template>
+
+    <template v-else>
     <div v-if="store.document" class="panel-hint">
       {{ panelHint }}
     </div>
@@ -58,6 +81,7 @@
         <div class="page-number">第 {{ index + 1 }} 页</div>
       </div>
     </div>
+    </template>
   </div>
 </template>
 
@@ -66,6 +90,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Document, CopyDocument } from '@element-plus/icons-vue'
 import { useEditorStore } from '@/stores/editorStore'
+import OutlinePanel from '@/components/OutlinePanel.vue'
 
 const store = useEditorStore()
 const dragFromIndex = ref<number | null>(null)
@@ -200,8 +225,8 @@ async function handleCopyPage(index: number) {
 
 <style scoped>
 .page-panel {
-  width: 178px;
-  min-width: 178px;
+  width: 200px;
+  min-width: 200px;
   background: var(--panel-bg);
   border-right: 1px solid var(--line);
   display: flex;
@@ -213,14 +238,41 @@ async function handleCopyPage(index: number) {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
   height: 42px;
-  padding: 0 16px;
+  padding: 0 10px 0 12px;
   font-size: 13px;
   font-weight: 650;
   color: var(--text-1);
   border-bottom: 1px solid var(--line);
   background: #fff;
   flex-shrink: 0;
+}
+
+.panel-tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.panel-tab {
+  border: none;
+  background: transparent;
+  color: var(--text-3);
+  font-size: 12px;
+  font-weight: 650;
+  padding: 4px 8px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.panel-tab.active {
+  color: var(--ribbon-accent);
+  background: var(--ribbon-accent-soft);
+}
+
+.panel-tab:hover:not(.active) {
+  color: var(--text-1);
+  background: var(--toolbar-bg-2);
 }
 
 .panel-hint {

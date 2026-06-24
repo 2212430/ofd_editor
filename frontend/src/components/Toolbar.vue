@@ -208,6 +208,14 @@
         <RibbonGroup label="导航">
           <RibbonButton label="手型" :icon="HandIcon" :active="store.currentTool === 'HAND'" @click="store.setTool('HAND')" />
           <RibbonButton label="选择" :icon="Rank" :active="store.currentTool === 'SELECT'" @click="store.setTool('SELECT')" />
+          <RibbonButton
+              label="大纲"
+              :icon="Menu"
+              :disabled="!store.document"
+              :active="store.leftPanelTab === 'outline'"
+              tooltip="显示文档书签目录（左侧面板）"
+              @click="store.showOutlinePanel()"
+          />
         </RibbonGroup>
         <RibbonSep />
         <RibbonGroup label="查找">
@@ -491,7 +499,7 @@ import {
   InfoFilled, Rank, FullScreen, View, Expand, Crop,
   Document, Reading, Sort, Picture, Files, PictureFilled, Monitor,
   Lock, Key, Stamp, Medal, QuestionFilled, Clock, Scissor,
-  Search, DocumentCopy, CircleCheck, Link as LinkIcon,
+  Search, DocumentCopy, CircleCheck, Link as LinkIcon, Menu,
 } from '@element-plus/icons-vue'
 import { useEditorStore } from '@/stores/editorStore'
 import { buildOfdBlobFromPdf, saveDocument } from '@/composables/useDocumentFileActions'
